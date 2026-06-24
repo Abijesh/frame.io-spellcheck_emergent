@@ -1,0 +1,29 @@
+{
+  "summary": "First test run. Backend pytest (7/7 passed) covers config, validation, invalid Frame.io URL graceful fail, full upload+OCR+Gemini pipeline, list with issue_count, manual post 400 without asset, and delete. Frontend Playwright covers landing/config badge=Connected, upload+submit, polling /analysis/:id through extracting->analyzing->done states, progress updates, history page with rows, navigation Home<->History, and validation toast for empty submit. End-to-end Gemini 3 Flash OCR worked — extracted 'Helo Wrld tset' and produced 10 spelling/grammar suggestions in ~20s.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Analysis.jsx IssueRow", "issue": "Frames captured at timestamp 0s are labeled 'Script' instead of '0s' because formatTime returns '—' for sec<=0 and the label uses timestamp_sec>0. Misleading: OCR issues from the first frame look like transcript-derived issues.", "selector": "[data-testid='issue-row']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "(Optional) Treat OCR frame timestamps of 0 distinctly from transcript issues in the UI label (e.g., show '0s' for frame 0 and 'Script' only when source is the transcript pass)."
+  ],
+  "critical_code_review_comments": [
+    "server.py uses Analysis.model_fields['updated_at'].default_factory() in _save/_set_status — works but brittle; prefer datetime.utcnow() or a helper.",
+    "_run_pipeline downloads, extracts and analyzes sequentially with no per-frame timeout/retry; a single slow Gemini call could stall the whole job.",
+    "Uploaded video temp dir (tmpdir from create_analysis) is never cleaned up after _run_pipeline — only workdir is removed.",
+    "post_comment results aren't surfaced in the API response on errors (only ok flag stored implicitly); consider logging failure reasons per-issue."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "Not applicable - no auth in app.",
+  "seed_data_creation": "Generated /tmp/test.mp4 (and /tmp/ui_test.mp4) via ffmpeg drawtext with intentional typos. Test analyses are cleaned up by the delete test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Pipeline e2e validated. EMERGENT_LLM_KEY + FRAMEIO_TOKEN already in backend/.env. ffmpeg at /usr/bin/ffmpeg. For Frame.io auto-post you'd need a real Frame.io asset URL; uploaded-video path skips posting (verified posted_count=0).",
+  "rca of the issue": "N/A - no failing issues."
+}
