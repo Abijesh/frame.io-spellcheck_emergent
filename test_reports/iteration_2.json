@@ -1,0 +1,25 @@
+{
+  "summary": "Share-link bug fix VERIFIED end-to-end. Backend: 9/9 pytest passed (7 from iteration_1 backend_test.py + 2 new share-link tests). Frontend: Playwright loaded /analysis/:id for a real f.io/pbR84Qul submission, polled through Downloading -> Analyzing -> Posting -> Done in ~50s, verified status=DONE, asset_id=48055c11-..., 9 issues, posted_count=0, and the new post-error banner rendered with 'Auto-post unavailable' + the explanatory text. The old error 'Frame.io API rejected the request. Token may be invalid...' is gone.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_share_link.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/share_link_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "frameio_service.resolve_share_video launches a full headless chromium per share request (~3-5s overhead + ~12s selector wait). For higher throughput, consider sharing a browser context across requests or caching the resolved CDN URL (it is signed but typically valid for hours).",
+    "post_error message embeds raw Frame.io 403 body verbatim ('403: {\"code\":500,...\"detail\":\"There was a problem with your request\"}'). Consider stripping/summarising the upstream JSON so the UI banner stays readable.",
+    "server.py still uses Analysis.model_fields['updated_at'].default_factory() in _save/_set_status (carried over from iteration_1) — brittle; replace with a simple _now_iso() helper.",
+    "Uploaded video temp dir from create_analysis is still not cleaned up after _run_pipeline (only workdir is removed) — pre-existing minor leak."
+  ],
+  "updated_files": ["/app/backend/tests/test_share_link.py"],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100%"},
+  "test_credentials": "N/A - no auth in app. EMERGENT_LLM_KEY + FRAMEIO_TOKEN in backend/.env.",
+  "seed_data_creation": "Two test analyses (share link + invalid URL) created and deleted by their respective tests. UI test also cleaned up via DELETE.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Headless chromium is at /pw-browsers (PLAYWRIGHT_BROWSERS_PATH). Share-link e2e takes ~45-50s wall-clock (browser launch ~3s + 6s video + 5 Gemini frames + posting). Real share URL https://f.io/pbR84Qul resolves to file_id 48055c11-2525-431f-8df3-894a12e0a6d3 and yields ~9-12 issues. post_error currently leaks the raw 403 JSON from Frame.io; consider sanitising in a future iteration.",
+  "rca of the issue": "Original bug: V4 Frame.io shares are not exposed via the V2 API used with the legacy fio-u- token, so /assets/{share_id} returned 403/404 -> pipeline failed. Fix verified: is_share_link() routes f.io/ and next.frame.io/share/ through resolve_share_video() (Playwright -> <video>.currentSrc -> signed CDN download). extract_asset_id() now returns the LAST UUID (file id) so frameio_asset_id correctly holds 48055c11-... Auto-post still fails (403) because the legacy token can't write to a share owned by another workspace; this is now surfaced via a non-fatal post_error field instead of marking the analysis 'failed'. Frontend renders [data-testid='post-error'] as an amber 'Auto-post unavailable' banner."
+}

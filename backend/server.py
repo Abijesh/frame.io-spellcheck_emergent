@@ -93,58 +93,104 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
 
         video_path = video_local_path
         if not video_path:
-            # download from frame.io
-            await _set_status(
-                analysis_id,
-                status="downloading",
-                progress=5,
-                message="Resolving Frame.io asset...",
-            )
-            asset_id = await frameio_service.resolve_asset_id(analysis.frameio_url or "")
-            if not asset_id:
+            url = analysis.frameio_url or ""
+            # ---- Public share link path (f.io / next.frame.io/share) ----
+            if frameio_service.is_share_link(url):
                 await _set_status(
                     analysis_id,
-                    status="failed",
-                    error="Could not extract Frame.io asset id from the URL. "
-                    "Paste a direct player link or upload the video file.",
-                    progress=100,
+                    status="downloading",
+                    progress=5,
+                    message="Resolving Frame.io share link...",
                 )
-                return
-            await _set_status(analysis_id, frameio_asset_id=asset_id)
+                share_info = await frameio_service.resolve_share_video(url)
+                if not share_info or not share_info.get("video_url"):
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Could not extract the video from this Frame.io "
+                        "share link. The share may be password-protected or "
+                        "expired.",
+                        progress=100,
+                    )
+                    return
+                if share_info.get("file_id"):
+                    await _set_status(
+                        analysis_id, frameio_asset_id=share_info["file_id"]
+                    )
+                video_path = os.path.join(workdir, "input.mp4")
+                await _set_status(
+                    analysis_id,
+                    message="Downloading video from Frame.io share...",
+                    progress=15,
+                )
+                ok = await frameio_service.download_video(
+                    share_info["video_url"], video_path
+                )
+                if not ok:
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Could not download the share video.",
+                        progress=100,
+                    )
+                    return
+            else:
+                # ---- Owned asset via V2 API ----
+                await _set_status(
+                    analysis_id,
+                    status="downloading",
+                    progress=5,
+                    message="Resolving Frame.io asset...",
+                )
+                asset_id = await frameio_service.resolve_asset_id(url)
+                if not asset_id:
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Could not extract Frame.io asset id from the URL. "
+                        "Paste a direct player link, a share link, or upload "
+                        "the video file.",
+                        progress=100,
+                    )
+                    return
+                await _set_status(analysis_id, frameio_asset_id=asset_id)
 
-            asset = await frameio_service.get_asset(asset_id)
-            if not asset:
-                await _set_status(
-                    analysis_id,
-                    status="failed",
-                    error="Frame.io API rejected the request. Token may be invalid "
-                    "or you don't have access to this asset.",
-                    progress=100,
-                )
-                return
-            download_url = frameio_service.get_video_download_url(asset)
-            if not download_url:
-                await _set_status(
-                    analysis_id,
-                    status="failed",
-                    error="Asset has no downloadable video URL.",
-                    progress=100,
-                )
-                return
+                asset = await frameio_service.get_asset(asset_id)
+                if not asset:
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Frame.io API rejected the request (403/404). "
+                        "If this is a share link from another user, paste the "
+                        "share URL directly (f.io/... or next.frame.io/share/...).",
+                        progress=100,
+                    )
+                    return
+                download_url = frameio_service.get_video_download_url(asset)
+                if not download_url:
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Asset has no downloadable video URL.",
+                        progress=100,
+                    )
+                    return
 
-            video_path = os.path.join(workdir, "input.mp4")
-            await _set_status(
-                analysis_id, message="Downloading video from Frame.io...", progress=15
-            )
-            ok = await frameio_service.download_video(download_url, video_path)
-            if not ok:
+                video_path = os.path.join(workdir, "input.mp4")
                 await _set_status(
                     analysis_id,
-                    status="failed",
-                    error="Could not download the video.",
-                    progress=100,
+                    message="Downloading video from Frame.io...",
+                    progress=15,
                 )
-                return
+                ok = await frameio_service.download_video(download_url, video_path)
+                if not ok:
+                    await _set_status(
+                        analysis_id,
+                        status="failed",
+                        error="Could not download the video.",
+                        progress=100,
+                    )
+                    return
 
         duration = video_service.get_duration(video_path)
         await _set_status(
@@ -221,6 +267,8 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         # Auto-post to Frame.io
         analysis = await _load(analysis_id)
         posted = 0
+        last_err: Optional[str] = None
+        post_err_msg: Optional[str] = None
         if (
             analysis
             and analysis.auto_post
@@ -245,6 +293,23 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     cid = (result.get("comment") or {}).get("id")
                     issue.frameio_comment_id = cid
                     posted += 1
+                else:
+                    last_err = result.get("error")
+
+        if (
+            analysis
+            and analysis.auto_post
+            and analysis.frameio_asset_id
+            and all_issues
+            and posted == 0
+        ):
+            # All posts failed — likely a V4 share or token without write access
+            post_err_msg = (
+                f"Could not post comments to Frame.io. {last_err or ''} "
+                "Public/shared assets from other users cannot be commented on "
+                "via a legacy developer token. Use a Frame.io URL from your own "
+                "workspace to enable auto-posting."
+            ).strip()
 
         await analyses_col.update_one(
             {"id": analysis_id},
@@ -254,6 +319,7 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     "progress": 100,
                     "issues": [i.model_dump() for i in all_issues],
                     "posted_count": posted,
+                    "post_error": post_err_msg,
                     "message": f"Done. {len(all_issues)} issues found, "
                     f"{posted} posted to Frame.io.",
                 }

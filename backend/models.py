@@ -50,6 +50,7 @@ class Analysis(BaseModel):
 
     issues: List[Issue] = Field(default_factory=list)
     posted_count: int = 0
+    post_error: Optional[str] = None
     error: Optional[str] = None
 
 

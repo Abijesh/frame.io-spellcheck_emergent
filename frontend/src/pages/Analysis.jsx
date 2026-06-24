@@ -207,6 +207,21 @@ export default function Analysis() {
             </div>
           </div>
         )}
+
+        {analysis.post_error && (
+          <div
+            data-testid="post-error"
+            className="mt-6 border border-amber-900 bg-amber-950/20 p-4 flex items-start gap-3"
+          >
+            <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 shrink-0" />
+            <div>
+              <div className="font-display font-bold text-amber-500 mb-1">
+                Auto-post unavailable
+              </div>
+              <p className="text-sm text-zinc-400">{analysis.post_error}</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Issues */}
