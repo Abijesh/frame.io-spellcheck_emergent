@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -33,7 +34,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
 from models import Analysis, Issue
-from services import ai_service, frameio_service, video_service
+from services import adobe_oauth, ai_service, frameio_service, video_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -269,6 +270,12 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         posted = 0
         last_err: Optional[str] = None
         post_err_msg: Optional[str] = None
+        adobe_token = await adobe_oauth.get_valid_access_token(db)
+        adobe_account_id: Optional[str] = None
+        if adobe_token:
+            me = await adobe_oauth.get_me(adobe_token)
+            data = (me or {}).get("data") if isinstance(me, dict) else None
+            adobe_account_id = (data or me or {}).get("account_id") if me else None
         if (
             analysis
             and analysis.auto_post
@@ -283,14 +290,20 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             )
             for issue in all_issues:
                 text = _format_comment(issue)
-                result = await frameio_service.post_comment(
-                    analysis.frameio_asset_id,
-                    text,
-                    timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec >= 0 else None,
-                )
+                ts = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
+                if adobe_token and adobe_account_id:
+                    result = await adobe_oauth.post_comment_v4(
+                        adobe_token, adobe_account_id,
+                        analysis.frameio_asset_id, text, timestamp_seconds=ts,
+                    )
+                else:
+                    result = await frameio_service.post_comment(
+                        analysis.frameio_asset_id, text, timestamp_seconds=ts,
+                    )
                 if result.get("ok"):
                     issue.posted_to_frameio = True
-                    cid = (result.get("comment") or {}).get("id")
+                    cobj = result.get("comment") or {}
+                    cid = cobj.get("id") or (cobj.get("data") or {}).get("id")
                     issue.frameio_comment_id = cid
                     posted += 1
                 else:
@@ -305,12 +318,17 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         ):
             # All posts failed — likely a V4 share or token without write access
             short_err = (last_err or "").split(":", 1)[0].strip() or "unknown error"
-            post_err_msg = (
-                f"Auto-post to Frame.io failed ({short_err}). Public share "
-                "links from other workspaces can't be commented on via a "
-                "legacy developer token — paste a Frame.io URL from your own "
-                "workspace to enable auto-posting."
-            )
+            if not adobe_token:
+                post_err_msg = (
+                    f"Auto-post failed ({short_err}). Connect Frame.io with "
+                    "Adobe sign-in (top-right) to post comments to any asset "
+                    "your account has access to."
+                )
+            else:
+                post_err_msg = (
+                    f"Auto-post failed ({short_err}). Your Frame.io account "
+                    "may not have comment permission on this asset."
+                )
 
         await analyses_col.update_one(
             {"id": analysis_id},
@@ -363,11 +381,52 @@ async def root():
 
 @api.get("/config")
 async def config():
+    token = await adobe_oauth.get_valid_access_token(db)
+    me = None
+    if token:
+        me = await adobe_oauth.get_me(token)
     return {
         "frameio_configured": bool(os.environ.get("FRAMEIO_TOKEN")),
         "llm_configured": bool(os.environ.get("EMERGENT_LLM_KEY")),
         "frame_interval": FRAME_INTERVAL,
+        "adobe_connected": bool(token),
+        "adobe_user": (me or {}).get("data", me) if me else None,
     }
+
+
+@api.get("/auth/adobe/login")
+async def adobe_login():
+    state = adobe_oauth.new_state()
+    await db.oauth_state.insert_one(
+        {"state": state, "created_at": datetime.now(timezone.utc).isoformat()}
+    )
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(adobe_oauth.build_authorize_url(state))
+
+
+@api.get("/auth/adobe/callback")
+async def adobe_callback(code: str, state: str):
+    from fastapi.responses import RedirectResponse
+    ok = await db.oauth_state.find_one_and_delete({"state": state})
+    if not ok:
+        raise HTTPException(400, "Invalid OAuth state")
+    try:
+        token_data = await adobe_oauth.exchange_code(code)
+        await adobe_oauth.save_tokens(db, token_data)
+    except Exception as exc:
+        logger.exception("OAuth callback failed")
+        return RedirectResponse(
+            f"{os.environ.get('FRONTEND_URL', '/')}/?adobe_error=" + str(exc)[:120]
+        )
+    return RedirectResponse(
+        f"{os.environ.get('FRONTEND_URL', '/')}/?adobe_connected=1"
+    )
+
+
+@api.post("/auth/adobe/logout")
+async def adobe_logout():
+    await adobe_oauth.clear_tokens(db)
+    return {"ok": True}
 
 
 @api.post("/analyses")
