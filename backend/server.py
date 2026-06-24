@@ -304,12 +304,13 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             and posted == 0
         ):
             # All posts failed — likely a V4 share or token without write access
+            short_err = (last_err or "").split(":", 1)[0].strip() or "unknown error"
             post_err_msg = (
-                f"Could not post comments to Frame.io. {last_err or ''} "
-                "Public/shared assets from other users cannot be commented on "
-                "via a legacy developer token. Use a Frame.io URL from your own "
+                f"Auto-post to Frame.io failed ({short_err}). Public share "
+                "links from other workspaces can't be commented on via a "
+                "legacy developer token — paste a Frame.io URL from your own "
                 "workspace to enable auto-posting."
-            ).strip()
+            )
 
         await analyses_col.update_one(
             {"id": analysis_id},
