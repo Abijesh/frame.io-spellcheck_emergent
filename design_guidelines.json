@@ -1,0 +1,95 @@
+{
+  "theme": "DARK",
+  "archetype": "4",
+  "archetype_name": "Swiss & High-Contrast (Dark Mode)",
+  "vibe": "Objective, rigid, functional, cinematic, high-end post-production.",
+  "color_palette": {
+    "background": {
+      "primary": "bg-black",
+      "secondary": "bg-zinc-950",
+      "tertiary": "bg-zinc-900"
+    },
+    "text": {
+      "primary": "text-white",
+      "secondary": "text-zinc-400",
+      "muted": "text-zinc-600"
+    },
+    "accent": {
+      "primary": "rose-600",
+      "primary_hover": "rose-500",
+      "warning": "amber-500",
+      "success": "emerald-500"
+    },
+    "border": "border-zinc-800"
+  },
+  "typography": {
+    "headings": {
+      "family": "Outfit, sans-serif",
+      "weights": ["300", "700", "900"],
+      "usage_rules": "Use tracking-tight for all headings. Never use Inter. Do not center by default."
+    },
+    "body": {
+      "family": "IBM Plex Sans, sans-serif",
+      "weights": ["400", "500"]
+    },
+    "mono": {
+      "family": "JetBrains Mono, monospace",
+      "weights": ["400"],
+      "usage": "Use for timestamps, data metrics, and technical labels."
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight",
+      "h3": "text-xl sm:text-2xl tracking-tight",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm tracking-wide"
+    }
+  },
+  "layout_and_spacing": {
+    "spacing_scale": "Use generous spacing: p-8, p-12 for sections. For dashboard, use tight gaps (gap-4, gap-6).",
+    "landing_page_grid": "MODE A: The 'Tetris' Grid. Asymmetrical layouts, overlapping elements.",
+    "dashboard_grid": "MODE B: The 'Control Room' Grid. Strict hierarchy, dense spacing, grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Every pixel utilized.",
+    "container_padding": "Containers with borders MUST have internal padding (p-6 or p-8)."
+  },
+  "surface_strategies": {
+    "navigation": "Glassmorphism (The 'Crystal' Variant): backdrop-blur-xl bg-black/60 with 1px border-white/10.",
+    "cards": "Grid Borders (The 'Technical' Look): border-collapse style, flat bg-zinc-950, border-zinc-800. Hover: slight lift (-translate-y-1) and subtle shadow.",
+    "modals_overlays": "Glassmorphism with heavy blur and sharp 1px border."
+  },
+  "motion_and_interaction": {
+    "hover_states": "Always explicitly set text color on hover (e.g., hover:bg-zinc-900 hover:text-white).",
+    "transitions": "Use specific properties, e.g., transition: transform 0.2s ease, opacity 0.2s ease.",
+    "marquee": "Use react-fast-marquee for an 'Editorial Ribbon' or 'Kinetic Texture' in the landing page."
+  },
+  "components": {
+    "buttons": "Flat solid surfaces with sharp 1px borders. Primary CTA uses bg-rose-600 text-white hover:bg-rose-500. Secondary uses bg-transparent border-zinc-800 text-white hover:bg-zinc-900.",
+    "inputs": "Shadcn UI heavily customized. bg-zinc-950 border-zinc-800 text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500.",
+    "tables": "Shadcn UI tables for the QA results dashboard. Use JetBrains Mono for timestamps.",
+    "charts": "Shadcn charts/Recharts for showing QA stats over time."
+  },
+  "media_and_icons": {
+    "icon_library": "@phosphor-icons/react",
+    "icon_style": "Duotone or bold weights to match the high-contrast tech vibe.",
+    "images": [
+      {
+        "category": "hero_background",
+        "url": "https://images.pexels.com/photos/13922614/pexels-photo-13922614.jpeg",
+        "description": "Abstract curved flame/glow pattern on a dark background. Use with a heavy bg-black/50 overlay."
+      },
+      {
+        "category": "dashboard_context",
+        "url": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d",
+        "description": "Video editing monitor in a dark room. Good for feature blocks."
+      }
+    ]
+  },
+  "accessibility": {
+    "contrast": "Ensure minimum 4.5:1 ratio. Tint greys slightly (cool or warm, avoid pure #808080).",
+    "focus": "Clear focus rings on all interactive elements.",
+    "testing_attributes": "All interactive elements MUST include data-testid attributes (e.g., data-testid=\"analyze-video-btn\")."
+  },
+  "page_specific_instructions": {
+    "landing_page": "High visual impact. Hero section with abstract background (opacity controlled). Large typography. Link input front and center. Display a marquee of supported formats/features.",
+    "dashboard": "Cardless or sharp rectangular cards. Video player/preview on the left or top, scrolling list of timestamped grammar/spelling issues on the right. Status indicators for 'Auto-posting to Frame.io'. Use monospace for timestamps."
+  }
+}
