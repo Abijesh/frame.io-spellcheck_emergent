@@ -194,10 +194,12 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     return
 
         duration = video_service.get_duration(video_path)
+        fps = video_service.get_fps(video_path)
         await _set_status(
             analysis_id,
             status="extracting",
             duration_sec=duration,
+            video_fps=fps,
             message="Extracting frames...",
             progress=25,
         )
@@ -273,9 +275,7 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         adobe_token = await adobe_oauth.get_valid_access_token(db)
         adobe_account_id: Optional[str] = None
         if adobe_token:
-            me = await adobe_oauth.get_me(adobe_token)
-            data = (me or {}).get("data") if isinstance(me, dict) else None
-            adobe_account_id = (data or me or {}).get("account_id") if me else None
+            adobe_account_id = await adobe_oauth.get_account_id(adobe_token)
         if (
             analysis
             and analysis.auto_post
@@ -290,15 +290,19 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             )
             for issue in all_issues:
                 text = _format_comment(issue)
-                ts = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
+                ts_sec = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
                 if adobe_token and adobe_account_id:
+                    ts_frames = (
+                        int(round(ts_sec * fps)) if ts_sec is not None else None
+                    )
                     result = await adobe_oauth.post_comment_v4(
                         adobe_token, adobe_account_id,
-                        analysis.frameio_asset_id, text, timestamp_seconds=ts,
+                        analysis.frameio_asset_id, text,
+                        timestamp_frames=ts_frames,
                     )
                 else:
                     result = await frameio_service.post_comment(
-                        analysis.frameio_asset_id, text, timestamp_seconds=ts,
+                        analysis.frameio_asset_id, text, timestamp_seconds=ts_sec,
                     )
                 if result.get("ok"):
                     issue.posted_to_frameio = True
@@ -390,7 +394,7 @@ async def config():
         "llm_configured": bool(os.environ.get("EMERGENT_LLM_KEY")),
         "frame_interval": FRAME_INTERVAL,
         "adobe_connected": bool(token),
-        "adobe_user": (me or {}).get("data", me) if me else None,
+        "adobe_user": (me or {}).get("data") if isinstance(me, dict) else None,
     }
 
 
@@ -490,6 +494,12 @@ async def manual_post(analysis_id: str):
     if not a.frameio_asset_id:
         raise HTTPException(400, "No Frame.io asset associated with this analysis.")
 
+    adobe_token = await adobe_oauth.get_valid_access_token(db)
+    adobe_account_id = (
+        await adobe_oauth.get_account_id(adobe_token) if adobe_token else None
+    )
+    fps = a.video_fps or 24.0
+
     posted = 0
     updated_issues: List[Issue] = []
     for issue in a.issues:
@@ -497,14 +507,23 @@ async def manual_post(analysis_id: str):
             updated_issues.append(issue)
             continue
         text = _format_comment(issue)
-        res = await frameio_service.post_comment(
-            a.frameio_asset_id,
-            text,
-            timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec >= 0 else None,
-        )
+        ts_sec = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
+        if adobe_token and adobe_account_id:
+            ts_frames = int(round(ts_sec * fps)) if ts_sec is not None else None
+            res = await adobe_oauth.post_comment_v4(
+                adobe_token, adobe_account_id, a.frameio_asset_id, text,
+                timestamp_frames=ts_frames,
+            )
+        else:
+            res = await frameio_service.post_comment(
+                a.frameio_asset_id, text, timestamp_seconds=ts_sec,
+            )
         if res.get("ok"):
             issue.posted_to_frameio = True
-            issue.frameio_comment_id = (res.get("comment") or {}).get("id")
+            cobj = res.get("comment") or {}
+            issue.frameio_comment_id = (
+                cobj.get("id") or (cobj.get("data") or {}).get("id")
+            )
             posted += 1
         updated_issues.append(issue)
 
@@ -512,6 +531,58 @@ async def manual_post(analysis_id: str):
     a.posted_count = sum(1 for i in a.issues if i.posted_to_frameio)
     await _save(a)
     return {"posted": posted, "total_posted": a.posted_count}
+
+
+@api.get("/analyses/{analysis_id}/csv")
+async def export_csv(analysis_id: str):
+    """Download all detected issues as a CSV."""
+    from fastapi.responses import StreamingResponse
+    import csv as csv_mod
+    import io
+
+    a = await _load(analysis_id)
+    if not a:
+        raise HTTPException(404, "Not found")
+
+    buf = io.StringIO()
+    w = csv_mod.writer(buf)
+    w.writerow([
+        "Timestamp (mm:ss)",
+        "Seconds",
+        "Type",
+        "Severity",
+        "Original",
+        "Suggestion",
+        "Explanation",
+        "Source text",
+        "Posted to Frame.io",
+    ])
+    for i in sorted(a.issues, key=lambda x: x.timestamp_sec):
+        ts = i.timestamp_sec
+        mm_ss = (
+            "Script"
+            if ts < 0
+            else f"{int(ts // 60):02d}:{int(ts % 60):02d}"
+        )
+        w.writerow([
+            mm_ss,
+            "" if ts < 0 else f"{ts:.2f}",
+            i.type,
+            i.severity,
+            i.original,
+            i.suggestion,
+            i.explanation,
+            i.source_text,
+            "yes" if i.posted_to_frameio else "no",
+        ])
+
+    buf.seek(0)
+    filename = f"proofio-{analysis_id[:8]}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @api.delete("/analyses/{analysis_id}")

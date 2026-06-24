@@ -6,8 +6,8 @@ import { listAnalyses } from "@/lib/api";
 
 const STATUS_COLOR = {
   done: "border-emerald-700 text-emerald-500",
-  failed: "border-rose-700 text-rose-500",
-  analyzing: "border-rose-700 text-rose-400",
+  failed: "border-brand-700 text-brand-500",
+  analyzing: "border-brand-700 text-brand-400",
   extracting: "border-blue-700 text-blue-400",
   downloading: "border-blue-700 text-blue-400",
   posting: "border-amber-700 text-amber-400",
@@ -41,7 +41,7 @@ export default function History() {
   return (
     <main data-testid="history-page" className="max-w-7xl mx-auto px-6 py-12">
       <div className="mb-10">
-        <span className="font-mono-tech text-xs text-rose-600 uppercase tracking-widest">
+        <span className="font-mono-tech text-xs text-brand-500 uppercase tracking-widest">
           Past reviews
         </span>
         <h1 className="font-display font-black text-4xl tracking-tighter mt-2">

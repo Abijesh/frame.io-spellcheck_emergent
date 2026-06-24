@@ -47,6 +47,7 @@ class Analysis(BaseModel):
     total_frames: int = 0
     analyzed_frames: int = 0
     duration_sec: float = 0.0
+    video_fps: float = 0.0
 
     issues: List[Issue] = Field(default_factory=list)
     posted_count: int = 0

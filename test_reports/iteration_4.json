@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 4 verified end-to-end. The reported bug ('app checks spelling but does not post comments' for f.io/M6WUQCEn) is FIXED. Backend: 9/9 new pytest cases passed in test_iteration4.py — share-link analysis with Adobe connected reaches status=done, video_fps>0 (29.97 fps from ffprobe), posted_count==issues count (10/10), post_error is None, and every issue is marked posted_to_frameio. CSV endpoint returns text/csv with Content-Disposition attachment, filename 'proofio-{id8}.csv', 9-column header row, data rows sorted by timestamp, and 404 for unknown IDs. Regression: /api/config exposes adobe_connected:true + adobe_user.email='abijeshgreg@gmail.com', invalid URL still fails gracefully, uploaded video pipeline reaches status=done. Frontend: brand-500 yellow #FDC500 verified on analyze-submit-btn (bg rgb(253,197,0) + text rgb(9,9,11) for AA contrast), Surgena font loaded on h1 (font-display class, computed font-family 'Surgena, IBM Plex Sans, sans-serif'), disconnect-frameio-btn rendered (connect-frameio-btn absent — correct because Adobe is connected), History page renders 19 past analyses including the new f.io/M6WUQCEn DONE row (10/10 posted) right above an earlier FAILED row for the same URL — direct evidence the fix works. Analysis detail page shows 10 issue-row entries all marked POSTED, no post-error banner, and download-csv-btn (anchor target=_blank, href=/api/analyses/{id}/csv) opens the CSV. Real CSV download confirmed via curl.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py _run_pipeline computes ts_frames = int(round(ts_sec * fps)) only when adobe_token AND adobe_account_id are present — fine, but if get_account_id() returns None silently the code falls back to legacy frameio_service.post_comment which the user's V4 share doesn't accept. Consider surfacing an explicit error when adobe_token exists but no account_id (currently the user would just see 'Auto-post failed' generic message).",
+    "server.py manual_post route uses fps = a.video_fps or 24.0 — good fallback, but for legacy analyses created before video_fps existed this hard-codes 24fps which will mis-place comments. Consider re-running ffprobe on the asset or backfilling fps.",
+    "server.py /api/analyses/{id}/csv writes header literally 'Timestamp (mm:ss)' — the review-request spec said 'Timestamp'. Functionally equivalent (tests allow either) but worth aligning if the column header is consumed downstream.",
+    "adobe_oauth.get_account_id always picks data[0]['id']. If the Adobe user belongs to multiple Frame.io accounts, this could pick the wrong tenant. Either persist account_id at OAuth time or let the user choose.",
+    "adobe_oauth.get_valid_access_token: refresh path returns token_data['access_token'] (plaintext) while cached path returns decrypt(doc['access_token']). Same effective value but asymmetric — call sites that compare or log will diverge. Recommend always returning the decrypted-from-DB value after save_tokens.",
+    "/api/config calls get_valid_access_token + get_me on every request. Navbar polls config every 30s — that's two Adobe API roundtrips per polling tick. Cache adobe_user for ~30s per token.",
+    "oauth_state collection still has no TTL — orphaned states from abandoned OAuth flows accumulate forever. Add a TTL index (e.g., 10 min)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 new + 7/7 iteration 2 regression + 5/5 iteration 3 regression all still pass)",
+    "frontend": "100% (analyze-submit-btn, disconnect-frameio-btn, download-csv-btn, issue-row, History rows, Surgena font, brand-500 #FDC500, AA contrast all verified)"
+  },
+  "test_credentials": "N/A — Adobe IMS already connected in MongoDB for user_id='default' (abijeshgreg@gmail.com). Real share URL https://f.io/M6WUQCEn is owned by this account.",
+  "seed_data_creation": "test_iteration4.py creates one share-link analysis (cleaned via the auto pipeline) and one uploaded analysis (deleted in test_cleanup_uploaded). The share-link analysis is intentionally left in the DB so it appears on History for visual verification.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Bug fix root cause was twofold: (1) /v4/me does NOT include account_id, must call /v4/accounts and use data[0].id (adobe_oauth.get_account_id); (2) V4 comment endpoint expects 'timestamp' as INTEGER FRAMES, not float seconds — server.py converts via int(round(ts_sec * video_service.get_fps(path))). Verified live with f.io/M6WUQCEn (29.97 fps, 10s, 10 issues, 10/10 posted). The CSV endpoint header is 'Timestamp (mm:ss)' (not the bare 'Timestamp' the spec suggested) — adjust the assertion if a stricter check is required. ffmpeg + chromium are at /usr/bin and /pw-browsers (already in place).",
+  "rca of the issue": "Original failure 'Auto-post failed (403). Your Frame.io account may not have comment permission' was misdiagnosed as a permission issue. Real cause: (a) adobe_account_id was being fetched from /v4/me which never returns it for the Adobe-IMS-issued token type, so account_id was None and the V4 POST URL was malformed; (b) when the URL was correct, V4 rejected the request body with 422 because 'timestamp' was sent as a float-seconds value, but V4 requires an integer frame number relative to the file's fps. Fix: (1) new adobe_oauth.get_account_id() calls GET /v4/accounts and picks data[0].id; (2) new video_service.get_fps() runs ffprobe to parse r_frame_rate; (3) server.py _run_pipeline and /post route now compute ts_frames = int(round(ts_sec * fps)) and pass timestamp_frames to post_comment_v4. End-to-end verification: status=done, video_fps=29.97, posted_count=10, post_error=null, all 10 issue.posted_to_frameio=true."
+}

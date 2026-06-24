@@ -9,13 +9,14 @@ import {
   Clock,
   ArrowLeft,
   Loader2,
+  Download,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { getAnalysis, postComments } from "@/lib/api";
+import { getAnalysis, postComments, API } from "@/lib/api";
 
 const formatTime = (sec) => {
   if (sec === undefined || sec === null || sec < 0) return "Script";
@@ -25,13 +26,13 @@ const formatTime = (sec) => {
 };
 
 const SEVERITY_COLOR = {
-  high: "border-rose-700 text-rose-500",
+  high: "border-brand-700 text-brand-500",
   medium: "border-amber-700 text-amber-500",
   low: "border-zinc-700 text-zinc-400",
 };
 
 const TYPE_COLOR = {
-  spelling: "bg-rose-600/10 text-rose-500 border-rose-700",
+  spelling: "bg-brand-500/10 text-brand-500 border-brand-700",
   grammar: "bg-amber-600/10 text-amber-500 border-amber-700",
   punctuation: "bg-zinc-700/30 text-zinc-300 border-zinc-700",
   capitalization: "bg-emerald-600/10 text-emerald-500 border-emerald-700",
@@ -42,10 +43,10 @@ const StatusBadge = ({ status }) => {
     queued: { label: "Queued", color: "border-zinc-700 text-zinc-400" },
     downloading: { label: "Downloading", color: "border-blue-700 text-blue-400" },
     extracting: { label: "Extracting", color: "border-blue-700 text-blue-400" },
-    analyzing: { label: "Analyzing", color: "border-rose-700 text-rose-400" },
+    analyzing: { label: "Analyzing", color: "border-brand-700 text-brand-400" },
     posting: { label: "Posting", color: "border-amber-700 text-amber-400" },
     done: { label: "Done", color: "border-emerald-700 text-emerald-400" },
-    failed: { label: "Failed", color: "border-rose-700 text-rose-500" },
+    failed: { label: "Failed", color: "border-brand-700 text-brand-500" },
   };
   const c = map[status] || map.queued;
   return (
@@ -155,12 +156,28 @@ export default function Analysis() {
           </div>
 
           <div className="flex items-center gap-2">
+            {analysis.status === "done" && issues.length > 0 && (
+              <a
+                href={`${API}/analyses/${id}/csv`}
+                target="_blank"
+                rel="noreferrer"
+                data-testid="download-csv-btn"
+              >
+                <Button
+                  variant="outline"
+                  className="border-zinc-700 bg-transparent hover:bg-zinc-900 text-white rounded-none font-mono-tech text-xs uppercase tracking-widest"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Export CSV
+                </Button>
+              </a>
+            )}
             {analysis.status === "done" && unposted > 0 && (
               <Button
                 onClick={onPost}
                 disabled={posting}
                 data-testid="post-comments-btn"
-                className="bg-rose-600 hover:bg-rose-500 text-white rounded-none font-mono-tech text-xs uppercase tracking-widest"
+                className="bg-brand-500 hover:bg-brand-400 text-zinc-950 rounded-none font-mono-tech text-xs uppercase tracking-widest"
               >
                 <Send className="w-4 h-4 mr-2" />
                 {posting ? "Posting..." : `Post ${unposted} to Frame.io`}
@@ -196,11 +213,11 @@ export default function Analysis() {
         {analysis.status === "failed" && (
           <div
             data-testid="analysis-error"
-            className="mt-6 border border-rose-900 bg-rose-950/30 p-4 flex items-start gap-3"
+            className="mt-6 border border-brand-900 bg-brand-950/30 p-4 flex items-start gap-3"
           >
-            <XCircle className="w-5 h-5 text-rose-500 mt-0.5 shrink-0" />
+            <XCircle className="w-5 h-5 text-brand-500 mt-0.5 shrink-0" />
             <div>
-              <div className="font-display font-bold text-rose-500 mb-1">
+              <div className="font-display font-bold text-brand-500 mb-1">
                 Analysis failed
               </div>
               <p className="text-sm text-zinc-400">{analysis.error}</p>
@@ -276,7 +293,7 @@ const Stat = ({ label, value, accent }) => (
     </div>
     <div
       className={`font-display font-bold text-2xl tracking-tight ${
-        accent ? "text-rose-500" : "text-white"
+        accent ? "text-brand-500" : "text-white"
       }`}
     >
       {value}
@@ -290,7 +307,7 @@ const IssueRow = ({ issue }) => (
     className="p-6 hover:bg-zinc-900/30 transition-colors duration-200 flex gap-6"
   >
     <div className="shrink-0 w-20">
-      <div className="font-mono-tech text-sm text-rose-500 flex items-center gap-1">
+      <div className="font-mono-tech text-sm text-brand-500 flex items-center gap-1">
         <Clock className="w-3 h-3" />
         {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
       </div>

@@ -31,6 +31,36 @@ def get_duration(video_path: str) -> float:
         return 0.0
 
 
+def get_fps(video_path: str) -> float:
+    """Return frames-per-second of the first video stream (defaults to 24)."""
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=r_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            timeout=30,
+        )
+        rate = out.decode().strip()  # e.g. "30/1" or "29970/1000"
+        if "/" in rate:
+            num, den = rate.split("/", 1)
+            den_f = float(den)
+            if den_f > 0:
+                return float(num) / den_f
+        return float(rate) if rate else 24.0
+    except Exception as exc:
+        logger.warning("ffprobe fps failed: %s", exc)
+        return 24.0
+
+
 async def extract_frames(
     video_path: str, out_dir: str, interval_seconds: float = 2.0
 ) -> List[Tuple[float, str]]:

@@ -15,7 +15,7 @@ const Feature = ({ icon: Icon, title, desc, testid }) => (
     data-testid={testid}
     className="border border-zinc-800 bg-zinc-950 p-8 transition-transform duration-200 hover:-translate-y-1"
   >
-    <Icon className="w-6 h-6 text-rose-600 mb-6" strokeWidth={1.5} />
+    <Icon className="w-6 h-6 text-brand-500 mb-6" strokeWidth={1.5} />
     <h3 className="font-display font-bold text-lg mb-2 tracking-tight">{title}</h3>
     <p className="text-sm text-zinc-500 leading-relaxed">{desc}</p>
   </div>
@@ -77,7 +77,7 @@ export default function Landing() {
           <div className="grid lg:grid-cols-12 gap-12 items-start">
             <div className="lg:col-span-7 fade-up">
               <div className="flex items-center gap-3 mb-8">
-                <span className="w-2 h-2 bg-rose-600 pulse-dot" />
+                <span className="w-2 h-2 bg-brand-500 pulse-dot" />
                 <span className="font-mono-tech text-xs text-zinc-500 uppercase tracking-widest">
                   Automated video QA · Gemini 3 Flash
                 </span>
@@ -87,7 +87,7 @@ export default function Landing() {
                 <br />
                 before your client
                 <br />
-                <span className="text-rose-600">does.</span>
+                <span className="text-brand-500">does.</span>
               </h1>
               <p className="text-zinc-400 text-lg max-w-xl leading-relaxed mb-10">
                 Drop in a Frame.io link. We read every on-screen frame, flag spelling
@@ -97,13 +97,13 @@ export default function Landing() {
 
               <div className="flex flex-wrap gap-6 font-mono-tech text-xs text-zinc-500 uppercase">
                 <span className="flex items-center gap-2">
-                  <Eye className="w-4 h-4 text-rose-600" /> Frame-by-frame OCR
+                  <Eye className="w-4 h-4 text-brand-500" /> Frame-by-frame OCR
                 </span>
                 <span className="flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-rose-600" /> Grammar + spelling
+                  <Sparkles className="w-4 h-4 text-brand-500" /> Grammar + spelling
                 </span>
                 <span className="flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-rose-600" /> Auto-posts comments
+                  <Zap className="w-4 h-4 text-brand-500" /> Auto-posts comments
                 </span>
               </div>
             </div>
@@ -147,7 +147,7 @@ export default function Landing() {
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
                     placeholder="https://app.frame.io/player/…"
-                    className="bg-black border-zinc-800 text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500 font-mono-tech text-sm h-11"
+                    className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono-tech text-sm h-11"
                   />
                 </div>
 
@@ -184,7 +184,7 @@ export default function Landing() {
                     onChange={(e) => setTranscript(e.target.value)}
                     rows={3}
                     placeholder="Paste the script if you have one — gives more accurate grammar feedback."
-                    className="bg-black border-zinc-800 text-white focus:border-rose-500 focus:ring-1 focus:ring-rose-500 text-sm resize-none"
+                    className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm resize-none"
                   />
                 </div>
 
@@ -212,7 +212,7 @@ export default function Landing() {
                   type="submit"
                   data-testid="analyze-submit-btn"
                   disabled={submitting}
-                  className="w-full bg-rose-600 hover:bg-rose-500 text-white border-0 h-12 font-mono-tech uppercase tracking-widest text-xs rounded-none"
+                  className="w-full bg-brand-500 hover:bg-brand-400 text-zinc-950 border-0 h-12 font-mono-tech uppercase tracking-widest text-xs rounded-none"
                 >
                   {submitting ? "Starting..." : (
                     <>
@@ -230,7 +230,7 @@ export default function Landing() {
       <section className="max-w-7xl mx-auto px-6 py-24">
         <div className="grid lg:grid-cols-12 gap-8 mb-16">
           <div className="lg:col-span-4">
-            <span className="font-mono-tech text-xs text-rose-600 uppercase tracking-widest">
+            <span className="font-mono-tech text-xs text-brand-500 uppercase tracking-widest">
               How it works
             </span>
             <h2 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-3">

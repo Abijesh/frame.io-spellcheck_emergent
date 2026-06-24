@@ -1,4 +1,12 @@
-@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@300;700;900&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400&display=swap");
+
+@font-face {
+  font-family: "Surgena";
+  src: url("./fonts/Surgena-Medium.otf") format("opentype");
+  font-weight: 400 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 @tailwind base;
 @tailwind components;
@@ -18,15 +26,14 @@ body {
 }
 
 .font-display {
-  font-family: "Outfit", sans-serif;
-  letter-spacing: -0.02em;
+  font-family: "Surgena", "IBM Plex Sans", sans-serif;
+  letter-spacing: -0.01em;
 }
 
 .font-mono-tech {
   font-family: "JetBrains Mono", monospace;
 }
 
-/* Subtle grain texture overlay for cinematic feel */
 .grain::before {
   content: "";
   position: fixed;
@@ -45,8 +52,8 @@ body {
     --card-foreground: 0 0% 98%;
     --popover: 0 0% 4%;
     --popover-foreground: 0 0% 98%;
-    --primary: 346 77% 49%; /* rose-600 */
-    --primary-foreground: 0 0% 100%;
+    --primary: 47 100% 50%; /* brand-500 #FDC500 */
+    --primary-foreground: 0 0% 6%;
     --secondary: 0 0% 9%;
     --secondary-foreground: 0 0% 98%;
     --muted: 0 0% 9%;
@@ -57,7 +64,7 @@ body {
     --destructive-foreground: 0 0% 98%;
     --border: 0 0% 15%;
     --input: 0 0% 9%;
-    --ring: 346 77% 49%;
+    --ring: 47 100% 50%;
     --radius: 0.25rem;
   }
 }
@@ -70,8 +77,8 @@ body {
     @apply bg-background text-foreground;
   }
   ::selection {
-    background: hsl(346 77% 49%);
-    color: white;
+    background: #FDC500;
+    color: #0a0a0a;
   }
 }
 

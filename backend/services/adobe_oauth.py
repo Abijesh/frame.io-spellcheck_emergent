@@ -164,7 +164,30 @@ async def v4_get(token: str, path: str) -> Optional[dict]:
 
 
 async def get_me(token: str) -> Optional[dict]:
-    return await v4_get(token, "/me")
+    """V4 /me returns {data: {id, name, email}} — no api-version header here."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{FRAMEIO_V4}/me",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if r.status_code >= 400:
+        logger.warning("V4 /me -> %s %s", r.status_code, r.text[:200])
+        return None
+    return r.json()
+
+
+async def get_account_id(token: str) -> Optional[str]:
+    """List accounts the user can access and return the first account id."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{FRAMEIO_V4}/accounts",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if r.status_code >= 400:
+        logger.warning("V4 /accounts -> %s %s", r.status_code, r.text[:200])
+        return None
+    data = r.json().get("data") or []
+    return data[0]["id"] if data else None
 
 
 async def get_share_files(
@@ -208,15 +231,13 @@ async def post_comment_v4(
     account_id: str,
     file_id: str,
     text: str,
-    timestamp_seconds: Optional[float] = None,
+    timestamp_frames: Optional[int] = None,
 ) -> dict:
-    payload: dict = {"data": {"text": text}}
-    if timestamp_seconds is not None and timestamp_seconds >= 0:
-        # V4 expects "timestamp" in frames; assume 24fps if we don't know.
-        # Posting in seconds*1000 (ms) is a common fallback; Frame.io accepts
-        # `timestamp` as float seconds in some endpoints. We try seconds first
-        # and let the server normalize.
-        payload["data"]["timestamp"] = float(timestamp_seconds)
+    """Post a comment to a V4 file. `timestamp` is in FRAMES (integer)."""
+    data: dict = {"text": text}
+    if timestamp_frames is not None and timestamp_frames >= 0:
+        data["timestamp"] = int(timestamp_frames)
+    payload = {"data": data}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
@@ -224,7 +245,6 @@ async def post_comment_v4(
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "api-version": "experimental",
                 },
                 json=payload,
             )
