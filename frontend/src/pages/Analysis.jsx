@@ -18,7 +18,7 @@ import { Separator } from "@/components/ui/separator";
 import { getAnalysis, postComments } from "@/lib/api";
 
 const formatTime = (sec) => {
-  if (!sec || sec < 0) return "—";
+  if (sec === undefined || sec === null || sec < 0) return "Script";
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
@@ -277,10 +277,10 @@ const IssueRow = ({ issue }) => (
     <div className="shrink-0 w-20">
       <div className="font-mono-tech text-sm text-rose-500 flex items-center gap-1">
         <Clock className="w-3 h-3" />
-        {formatTime(issue.timestamp_sec)}
+        {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
       </div>
       <div className="font-mono-tech text-[10px] text-zinc-600 mt-1">
-        {issue.timestamp_sec > 0 ? `${Math.round(issue.timestamp_sec)}s` : "Script"}
+        {issue.timestamp_sec >= 0 ? `${Math.round(issue.timestamp_sec)}s` : "Transcript"}
       </div>
     </div>
 

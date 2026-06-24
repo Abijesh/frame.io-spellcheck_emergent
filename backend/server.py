@@ -208,7 +208,7 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             for e in t_errors:
                 all_issues.append(
                     Issue(
-                        timestamp_sec=0.0,
+                        timestamp_sec=-1.0,
                         type=e.get("type", "grammar"),
                         original=e.get("original", ""),
                         suggestion=e.get("suggestion", ""),
@@ -238,7 +238,7 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                 result = await frameio_service.post_comment(
                     analysis.frameio_asset_id,
                     text,
-                    timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec > 0 else None,
+                    timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec >= 0 else None,
                 )
                 if result.get("ok"):
                     issue.posted_to_frameio = True
@@ -374,7 +374,7 @@ async def manual_post(analysis_id: str):
         res = await frameio_service.post_comment(
             a.frameio_asset_id,
             text,
-            timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec > 0 else None,
+            timestamp_seconds=issue.timestamp_sec if issue.timestamp_sec >= 0 else None,
         )
         if res.get("ok"):
             issue.posted_to_frameio = True
