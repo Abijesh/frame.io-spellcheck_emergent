@@ -61,6 +61,25 @@ def _basic_auth() -> str:
     return base64.b64encode(raw).decode()
 
 
+def new_state() -> str:
+    """Return a Fernet-signed nonce. Stateless: no DB lookup needed on
+    callback, so the flow survives backend restarts and works across
+    multiple browser tabs."""
+    nonce = secrets.token_urlsafe(16)
+    return _fernet().encrypt(nonce.encode()).decode()
+
+
+def verify_state(state: str) -> bool:
+    if not state:
+        return False
+    try:
+        # Accept tokens up to 30 minutes old
+        _fernet().decrypt(state.encode(), ttl=1800)
+        return True
+    except Exception:
+        return False
+
+
 def build_authorize_url(state: str) -> str:
     params = {
         "client_id": _client_id(),
@@ -70,10 +89,6 @@ def build_authorize_url(state: str) -> str:
         "state": state,
     }
     return f"{ADOBE_AUTH_URL}?{urllib.parse.urlencode(params)}"
-
-
-def new_state() -> str:
-    return secrets.token_urlsafe(24)
 
 
 async def exchange_code(code: str) -> dict:

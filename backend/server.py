@@ -401,9 +401,6 @@ async def config():
 @api.get("/auth/adobe/login")
 async def adobe_login():
     state = adobe_oauth.new_state()
-    await db.oauth_state.insert_one(
-        {"state": state, "created_at": datetime.now(timezone.utc).isoformat()}
-    )
     from fastapi.responses import RedirectResponse
     return RedirectResponse(adobe_oauth.build_authorize_url(state))
 
@@ -411,8 +408,7 @@ async def adobe_login():
 @api.get("/auth/adobe/callback")
 async def adobe_callback(code: str, state: str):
     from fastapi.responses import RedirectResponse
-    ok = await db.oauth_state.find_one_and_delete({"state": state})
-    if not ok:
+    if not adobe_oauth.verify_state(state):
         raise HTTPException(400, "Invalid OAuth state")
     try:
         token_data = await adobe_oauth.exchange_code(code)

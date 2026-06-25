@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 5 - OAuth state fix verification. All 4 critical bug-fix assertions PASSED: (1) /api/auth/adobe/login returns 307 to Adobe IMS with a Fernet-signed `state` param (122 chars, starts with 'gAAAAA'); (2) callback with valid signed state proceeds past state-check and exits via FRONTEND_URL/?adobe_error=... after exchange_code fails on fake code (backend log confirms 'Adobe token exchange 400: access_denied' — meaning state-check passed, exchange ran); (3) callback with garbage state returns 400 'Invalid OAuth state'; (4) callback with empty state returns 4xx. DB side-effect verified: /api/auth/adobe/login no longer writes to db.oauth_state (count stayed at 4 — pre-existing leftovers — across 3 logins). CSV endpoint regression passed. HOWEVER: /api/config now returns adobe_connected:false / adobe_user:null — the `adobe_tokens` collection in MongoDB is EMPTY (count=0). The Adobe session for user_id='default' has been WIPED. This is NOT caused by the Fernet state change (the state token is decoupled from token storage) but it breaks the share-posting regression in the review request. The user must re-do the Adobe OAuth flow. Separate environmental regression: /pw-browsers contains chromium_headless_shell-1208 but Playwright now expects 1223 — backend logs show 'Executable doesn't exist at /pw-browsers/chromium_headless_shell-1223/chrome-linux/headless_shell' which will break the share-link resolution pipeline.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/config + db.adobe_tokens", "issue": "adobe_tokens collection is empty (count=0). adobe_connected=false, adobe_user=null. The persistent Adobe session that the review request says must be intact has been lost. Cannot regression-test POST /api/analyses with frameio_url=https://f.io/M6WUQCEn (V4 posting needs Adobe token). Not caused by the Fernet state change — likely a pod/storage event. User must re-authenticate via Adobe IMS.", "priority": "CRITICAL"},
+      {"endpoint": "internal (playwright)", "issue": "/pw-browsers has chromium_headless_shell-1208 installed, but the playwright python lib now looks for 1223 (BrowserType.launch: Executable doesn't exist at /pw-browsers/chromium_headless_shell-1223/chrome-linux/headless_shell). This breaks share-link video resolution (services/frameio_service.resolve_share_video). Run `playwright install chromium` to refresh.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "db.oauth_state", "issue": "Collection still contains 4 leftover documents from the pre-Fernet flow. Code no longer writes to it (verified) and the collection still has no TTL index. Recommend dropping the collection or adding TTL 600s on created_at."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_oauth.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: The adobe_tokens collection is empty. The user (or main agent) must redo the Adobe OAuth flow at /api/auth/adobe/login to restore the session for abijeshgreg@gmail.com. The bug fix itself is verified end-to-end and will not break a fresh login.",
+    "HIGH: Reinstall the playwright chromium browser to match the installed lib version. `cd /app/backend && python -m playwright install chromium` (and ffmpeg if needed). The currently installed shell is version 1208 but Playwright now requires 1223.",
+    "OPTIONAL CLEANUP: drop the db.oauth_state collection — it is no longer written to and only holds orphaned docs from the old flow."
+  ],
+  "critical_code_review_comments": [
+    "adobe_oauth.new_state()/verify_state() implementation is clean. Fernet TTL of 1800s is reasonable. Consider returning the verify failure reason (expired vs tampered vs malformed) in logs for debuggability — currently both bare-except swallows it.",
+    "server.py /api/auth/adobe/callback catches exceptions from exchange_code and redirects to /?adobe_error=... but it leaks up to 120 chars of the upstream error string (including 'access_denied'). Fine for users, but if you ever proxy a sensitive error consider sanitizing.",
+    "FRONTEND_URL fallback in server.py is '/' — if the env var is missing the redirect becomes '//?adobe_connected=1' which is a protocol-relative URL. Tighten the fallback to a known origin.",
+    "db.oauth_state collection is now orphaned. Either drop it at app startup or document it as dead. Leftover docs are harmless but confusing."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_oauth.py"
+  ],
+  "success_rate": {
+    "backend": "OAuth state bug fix: 4/4 PASS (100%). Overall iteration 5 suite: 6/7 (one regression failed due to environmental session loss, not the fix).",
+    "frontend": "not tested per review request (backend only)"
+  },
+  "test_credentials": "N/A — Adobe IMS session was expected to exist for user_id='default' but db.adobe_tokens is empty.",
+  "seed_data_creation": "None. Test hits /api/auth/adobe/login 4 times producing 4 transient redirects with new Fernet states — no DB writes.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The OAuth state Fernet fix is fully verified — see test_iteration5_oauth.py. The state token now (a) starts with 'gAAAAA', (b) is ~122 chars, (c) survives backend restarts, (d) rejects garbage with 400 and (e) does not touch the oauth_state Mongo collection. The two pending blockers are environmental: (1) db.adobe_tokens is empty so the user has to re-login via Adobe IMS, (2) /pw-browsers has chromium 1208 but playwright lib wants 1223. Once both are addressed, re-run /api/analyses POST with https://f.io/M6WUQCEn to confirm full V4 share-posting still works (iteration 4 covered this and is unaffected by the Fernet change).",
+  "rca of the issue": "User-reported bug ('cannot log in to adobe, goes to error 404'): root cause was that OAuth `state` nonces were stored in Mongo `oauth_state` and consumed via find_one_and_delete on the callback. After backend restarts (which had wiped ffmpeg/chromium during earlier iterations), the in-flight state docs were lost or the user was navigating with stale URLs, causing every callback to return 400 'Invalid OAuth state' — which the UI rendered as a 404-feeling failure page. Mitigation (verified): stateless Fernet-signed state tokens with a 30-min TTL. The state value carries its own validity proof, so callbacks survive backend restarts, work in multiple tabs, and don't require any DB write on /login. Verified by (i) inspecting the redirect Location query string from /api/auth/adobe/login (Fernet token format, 122 chars), (ii) hitting /api/auth/adobe/callback with that same state + a fake code and observing the backend reaches exchange_code (log line 'Adobe token exchange 400: access_denied'), (iii) hitting /callback with random garbage and getting back the explicit 400 'Invalid OAuth state'."
+}
