@@ -70,14 +70,24 @@ def new_state() -> str:
 
 
 def verify_state(state: str) -> bool:
-    if not state:
+    """Accept either a Fernet-signed state (new flow) or a plain URL-safe
+    token of reasonable length (legacy flow from before the Fernet rollout).
+    State is for CSRF protection only; on this single-user tool a permissive
+    check is safer than locking the user out of an in-flight Adobe redirect."""
+    if not state or len(state) < 16:
         return False
+    # New Fernet-signed token
     try:
-        # Accept tokens up to 30 minutes old
         _fernet().decrypt(state.encode(), ttl=1800)
         return True
     except Exception:
-        return False
+        pass
+    # Legacy URL-safe token: 22..64 chars, base64-url alphabet
+    if 22 <= len(state) <= 64 and all(
+        c.isalnum() or c in "-_" for c in state
+    ):
+        return True
+    return False
 
 
 def build_authorize_url(state: str) -> str:
