@@ -1,26 +1,26 @@
-"""Frame.io QA backend.
+"""Frame.io QA backend (guest-mode commenting).
 
-Pipeline per analysis (run as a background task):
-  1. Resolve Frame.io URL → asset id → signed video URL → download to /tmp.
-     OR use uploaded video file.
-  2. ffmpeg → extract one frame every FRAME_SAMPLE_INTERVAL seconds.
-  3. Gemini 3 Flash on each frame → OCR + spelling/grammar issues.
-  4. Optional transcript-level grammar pass.
-  5. Auto-post each issue back to Frame.io as a comment with timestamp.
+No Adobe OAuth. Pipeline per analysis:
+  1. If a Frame.io share URL is given, open it in headless Chromium
+     (fills password if provided) and grab the signed video CDN URL.
+     If a video was uploaded, use that directly and skip step 5.
+  2. ffmpeg extracts one frame every FRAME_SAMPLE_INTERVAL seconds.
+  3. Gemini 3 Flash analyses each frame for OCR + spelling/grammar.
+  4. Optional transcript-level pass.
+  5. Headless Chromium opens the share again, posts each issue as a guest
+     comment under the name 'Spellchecker' at the right timestamp.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import shutil
 import tempfile
-import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from datetime import datetime, timezone
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -34,7 +34,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
 from models import Analysis, Issue
-from services import adobe_oauth, ai_service, frameio_service, video_service
+from services import ai_service, frameio_service, video_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -57,22 +57,25 @@ api = APIRouter(prefix="/api")
 
 
 # ---------------- helpers ----------------
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 async def _save(analysis: Analysis) -> None:
-    analysis.updated_at = Analysis.model_fields["updated_at"].default_factory()  # type: ignore
-    doc = analysis.model_dump()
-    await analyses_col.replace_one({"id": analysis.id}, doc, upsert=True)
+    analysis.updated_at = _now_iso()
+    await analyses_col.replace_one(
+        {"id": analysis.id}, analysis.model_dump(), upsert=True
+    )
 
 
 async def _set_status(analysis_id: str, **patch) -> None:
-    patch["updated_at"] = Analysis.model_fields["updated_at"].default_factory()  # type: ignore
+    patch["updated_at"] = _now_iso()
     await analyses_col.update_one({"id": analysis_id}, {"$set": patch})
 
 
 async def _load(analysis_id: str) -> Optional[Analysis]:
     doc = await analyses_col.find_one({"id": analysis_id}, {"_id": 0})
-    if not doc:
-        return None
-    return Analysis(**doc)
+    return Analysis(**doc) if doc else None
 
 
 def _severity_for(err_type: str) -> str:
@@ -82,6 +85,23 @@ def _severity_for(err_type: str) -> str:
         "punctuation": "low",
         "capitalization": "medium",
     }.get(err_type, "medium")
+
+
+def _format_comment(issue: Issue) -> str:
+    label = {
+        "spelling": "Spelling",
+        "grammar": "Grammar",
+        "punctuation": "Punctuation",
+        "capitalization": "Capitalization",
+    }.get(issue.type, "Issue")
+    parts = [f"[{label}]"]
+    if issue.original:
+        parts.append(f'"{issue.original}"')
+    if issue.suggestion:
+        parts.append(f"→ \"{issue.suggestion}\"")
+    if issue.explanation:
+        parts.append(f"— {issue.explanation}")
+    return " ".join(parts)
 
 
 # ---------------- background pipeline ----------------
@@ -95,103 +115,58 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         video_path = video_local_path
         if not video_path:
             url = analysis.frameio_url or ""
-            # ---- Public share link path (f.io / next.frame.io/share) ----
-            if frameio_service.is_share_link(url):
+            if not frameio_service.is_share_link(url):
                 await _set_status(
                     analysis_id,
-                    status="downloading",
-                    progress=5,
-                    message="Resolving Frame.io share link...",
+                    status="failed",
+                    error="Paste a Frame.io share link (f.io/... or "
+                    "next.frame.io/share/...) or upload a video file.",
+                    progress=100,
                 )
-                share_info = await frameio_service.resolve_share_video(url)
-                if not share_info or not share_info.get("video_url"):
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Could not extract the video from this Frame.io "
-                        "share link. The share may be password-protected or "
-                        "expired.",
-                        progress=100,
-                    )
-                    return
-                if share_info.get("file_id"):
-                    await _set_status(
-                        analysis_id, frameio_asset_id=share_info["file_id"]
-                    )
-                video_path = os.path.join(workdir, "input.mp4")
-                await _set_status(
-                    analysis_id,
-                    message="Downloading video from Frame.io share...",
-                    progress=15,
-                )
-                ok = await frameio_service.download_video(
-                    share_info["video_url"], video_path
-                )
-                if not ok:
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Could not download the share video.",
-                        progress=100,
-                    )
-                    return
-            else:
-                # ---- Owned asset via V2 API ----
-                await _set_status(
-                    analysis_id,
-                    status="downloading",
-                    progress=5,
-                    message="Resolving Frame.io asset...",
-                )
-                asset_id = await frameio_service.resolve_asset_id(url)
-                if not asset_id:
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Could not extract Frame.io asset id from the URL. "
-                        "Paste a direct player link, a share link, or upload "
-                        "the video file.",
-                        progress=100,
-                    )
-                    return
-                await _set_status(analysis_id, frameio_asset_id=asset_id)
+                return
 
-                asset = await frameio_service.get_asset(asset_id)
-                if not asset:
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Frame.io API rejected the request (403/404). "
-                        "If this is a share link from another user, paste the "
-                        "share URL directly (f.io/... or next.frame.io/share/...).",
-                        progress=100,
-                    )
-                    return
-                download_url = frameio_service.get_video_download_url(asset)
-                if not download_url:
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Asset has no downloadable video URL.",
-                        progress=100,
-                    )
-                    return
-
-                video_path = os.path.join(workdir, "input.mp4")
+            await _set_status(
+                analysis_id,
+                status="downloading",
+                progress=5,
+                message="Opening Frame.io share...",
+            )
+            info = await frameio_service.resolve_share_video(url, analysis.password)
+            if info.get("password_required"):
                 await _set_status(
                     analysis_id,
-                    message="Downloading video from Frame.io...",
-                    progress=15,
+                    status="failed",
+                    error=info.get("error") or "Password required.",
+                    password_required=True,
+                    progress=100,
                 )
-                ok = await frameio_service.download_video(download_url, video_path)
-                if not ok:
-                    await _set_status(
-                        analysis_id,
-                        status="failed",
-                        error="Could not download the video.",
-                        progress=100,
-                    )
-                    return
+                return
+            if not info.get("video_url"):
+                await _set_status(
+                    analysis_id,
+                    status="failed",
+                    error=info.get("error")
+                    or "Could not read the video from this share. The share may "
+                    "be expired or restricted.",
+                    progress=100,
+                )
+                return
+            if info.get("file_id"):
+                await _set_status(analysis_id, frameio_asset_id=info["file_id"])
+
+            video_path = os.path.join(workdir, "input.mp4")
+            await _set_status(
+                analysis_id, message="Downloading video...", progress=15
+            )
+            ok = await frameio_service.download_video(info["video_url"], video_path)
+            if not ok:
+                await _set_status(
+                    analysis_id,
+                    status="failed",
+                    error="Failed to download the video.",
+                    progress=100,
+                )
+                return
 
         duration = video_service.get_duration(video_path)
         fps = video_service.get_fps(video_path)
@@ -216,31 +191,28 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             progress=30,
         )
 
-        # analyze frames sequentially (free-tier safe) with progress updates
         all_issues: List[Issue] = []
         for idx, (ts, fpath) in enumerate(frames):
             errs = await ai_service.analyze_frame(fpath)
             for e in errs:
-                issue = Issue(
-                    timestamp_sec=float(ts),
-                    type=e.get("type", "spelling"),
-                    original=e.get("original", ""),
-                    suggestion=e.get("suggestion", ""),
-                    explanation=e.get("explanation", ""),
-                    source_text=e.get("source_text", ""),
-                    severity=_severity_for(e.get("type", "spelling")),
+                all_issues.append(
+                    Issue(
+                        timestamp_sec=float(ts),
+                        type=e.get("type", "spelling"),
+                        original=e.get("original", ""),
+                        suggestion=e.get("suggestion", ""),
+                        explanation=e.get("explanation", ""),
+                        source_text=e.get("source_text", ""),
+                        severity=_severity_for(e.get("type", "spelling")),
+                    )
                 )
-                all_issues.append(issue)
-
-            # progress: 30 → 80
             done = idx + 1
-            prog = 30 + int(50 * done / max(len(frames), 1))
             await analyses_col.update_one(
                 {"id": analysis_id},
                 {
                     "$set": {
                         "analyzed_frames": done,
-                        "progress": prog,
+                        "progress": 30 + int(50 * done / max(len(frames), 1)),
                         "issues": [i.model_dump() for i in all_issues],
                         "message": f"Analyzed frame {done}/{len(frames)} ({int(ts)}s)",
                     }
@@ -253,8 +225,7 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             await _set_status(
                 analysis_id, message="Checking transcript...", progress=82
             )
-            t_errors = await ai_service.analyze_transcript(analysis.transcript)
-            for e in t_errors:
+            for e in await ai_service.analyze_transcript(analysis.transcript):
                 all_issues.append(
                     Issue(
                         timestamp_sec=-1.0,
@@ -267,71 +238,44 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     )
                 )
 
-        # Auto-post to Frame.io
+        # Guest comment posting
         analysis = await _load(analysis_id)
         posted = 0
-        last_err: Optional[str] = None
         post_err_msg: Optional[str] = None
-        adobe_token = await adobe_oauth.get_valid_access_token(db)
-        adobe_account_id: Optional[str] = None
-        if adobe_token:
-            adobe_account_id = await adobe_oauth.get_account_id(adobe_token)
         if (
             analysis
             and analysis.auto_post
-            and analysis.frameio_asset_id
+            and analysis.frameio_url
+            and frameio_service.is_share_link(analysis.frameio_url)
             and all_issues
         ):
             await _set_status(
                 analysis_id,
                 status="posting",
                 progress=85,
-                message=f"Posting {len(all_issues)} comments to Frame.io...",
+                message=f"Posting {len(all_issues)} comments as Spellchecker...",
             )
-            for issue in all_issues:
-                text = _format_comment(issue)
-                ts_sec = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
-                if adobe_token and adobe_account_id:
-                    ts_frames = (
-                        int(round(ts_sec * fps)) if ts_sec is not None else None
-                    )
-                    result = await adobe_oauth.post_comment_v4(
-                        adobe_token, adobe_account_id,
-                        analysis.frameio_asset_id, text,
-                        timestamp_frames=ts_frames,
-                    )
-                else:
-                    result = await frameio_service.post_comment(
-                        analysis.frameio_asset_id, text, timestamp_seconds=ts_sec,
-                    )
-                if result.get("ok"):
+            payloads = [
+                {
+                    "timestamp_sec": i.timestamp_sec,
+                    "text": _format_comment(i),
+                }
+                for i in all_issues
+            ]
+            result = await frameio_service.submit_guest_comments(
+                analysis.frameio_url, analysis.password, payloads
+            )
+            flags = result.get("posted_flags") or []
+            for idx, issue in enumerate(all_issues):
+                if idx < len(flags) and flags[idx]:
                     issue.posted_to_frameio = True
-                    cobj = result.get("comment") or {}
-                    cid = cobj.get("id") or (cobj.get("data") or {}).get("id")
-                    issue.frameio_comment_id = cid
-                    posted += 1
-                else:
-                    last_err = result.get("error")
-
-        if (
-            analysis
-            and analysis.auto_post
-            and analysis.frameio_asset_id
-            and all_issues
-            and posted == 0
-        ):
-            # All posts failed — likely a V4 share or token without write access
-            short_err = (last_err or "").split(":", 1)[0].strip() or "unknown error"
-            if not adobe_token:
+            posted = result.get("posted", 0)
+            if result.get("error"):
+                post_err_msg = result["error"]
+            elif result.get("failed", 0) > 0 and posted == 0:
                 post_err_msg = (
-                    f"Auto-post failed ({short_err}). Connect Frame.io with "
-                    "Adobe sign-in (top-right) to post comments to any asset "
-                    "your account has access to."
-                )
-            else:
-                post_err_msg = (
-                    f"Auto-post failed ({short_err}). Your Frame.io account "
-                    "may not have comment permission on this asset."
+                    "Frame.io rejected all comments. The share owner may have "
+                    "disabled commenting on this link."
                 )
 
         await analyses_col.update_one(
@@ -344,37 +288,17 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     "posted_count": posted,
                     "post_error": post_err_msg,
                     "message": f"Done. {len(all_issues)} issues found, "
-                    f"{posted} posted to Frame.io.",
+                    f"{posted} posted as Spellchecker.",
                 }
             },
         )
     except Exception as exc:
         logger.exception("Pipeline failed: %s", exc)
         await _set_status(
-            analysis_id,
-            status="failed",
-            error=str(exc),
-            progress=100,
+            analysis_id, status="failed", error=str(exc), progress=100
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
-
-
-def _format_comment(issue: Issue) -> str:
-    label = {
-        "spelling": "Spelling",
-        "grammar": "Grammar",
-        "punctuation": "Punctuation",
-        "capitalization": "Capitalization",
-    }.get(issue.type, "Issue")
-    parts = [f"[{label}]"]
-    if issue.original:
-        parts.append(f'"{issue.original}"')
-    if issue.suggestion:
-        parts.append(f"→ \"{issue.suggestion}\"")
-    if issue.explanation:
-        parts.append(f"— {issue.explanation}")
-    return " ".join(parts)
 
 
 # ---------------- routes ----------------
@@ -385,48 +309,11 @@ async def root():
 
 @api.get("/config")
 async def config():
-    token = await adobe_oauth.get_valid_access_token(db)
-    me = None
-    if token:
-        me = await adobe_oauth.get_me(token)
     return {
-        "frameio_configured": bool(os.environ.get("FRAMEIO_TOKEN")),
         "llm_configured": bool(os.environ.get("EMERGENT_LLM_KEY")),
         "frame_interval": FRAME_INTERVAL,
-        "adobe_connected": bool(token),
-        "adobe_user": (me or {}).get("data") if isinstance(me, dict) else None,
+        "guest_name": frameio_service.GUEST_NAME,
     }
-
-
-@api.get("/auth/adobe/login")
-async def adobe_login():
-    state = adobe_oauth.new_state()
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(adobe_oauth.build_authorize_url(state))
-
-
-@api.get("/auth/adobe/callback")
-async def adobe_callback(code: str, state: str):
-    from fastapi.responses import RedirectResponse
-    if not adobe_oauth.verify_state(state):
-        raise HTTPException(400, "Invalid OAuth state")
-    try:
-        token_data = await adobe_oauth.exchange_code(code)
-        await adobe_oauth.save_tokens(db, token_data)
-    except Exception as exc:
-        logger.exception("OAuth callback failed")
-        return RedirectResponse(
-            f"{os.environ.get('FRONTEND_URL', '/')}/?adobe_error=" + str(exc)[:120]
-        )
-    return RedirectResponse(
-        f"{os.environ.get('FRONTEND_URL', '/')}/?adobe_connected=1"
-    )
-
-
-@api.post("/auth/adobe/logout")
-async def adobe_logout():
-    await adobe_oauth.clear_tokens(db)
-    return {"ok": True}
 
 
 @api.post("/analyses")
@@ -434,18 +321,20 @@ async def create_analysis(
     background: BackgroundTasks,
     frameio_url: Optional[str] = Form(None),
     transcript: Optional[str] = Form(None),
+    password: Optional[str] = Form(None),
     auto_post: bool = Form(True),
     video: Optional[UploadFile] = File(None),
 ):
     if not frameio_url and not video:
         raise HTTPException(
             status_code=400,
-            detail="Provide either a Frame.io URL or a video file.",
+            detail="Provide either a Frame.io share link or a video file.",
         )
 
     analysis = Analysis(
         frameio_url=frameio_url,
         transcript=transcript,
+        password=password,
         auto_post=auto_post,
         video_filename=video.filename if video else None,
     )
@@ -466,10 +355,10 @@ async def create_analysis(
 async def list_analyses():
     cursor = analyses_col.find({}, {"_id": 0}).sort("created_at", -1).limit(50)
     items = await cursor.to_list(length=50)
-    # trim issues from list view for payload size
     for it in items:
         it["issue_count"] = len(it.get("issues") or [])
         it["issues"] = []
+        it.pop("password", None)
     return items
 
 
@@ -478,60 +367,50 @@ async def get_analysis(analysis_id: str):
     a = await _load(analysis_id)
     if not a:
         raise HTTPException(404, "Not found")
-    return a.model_dump()
+    d = a.model_dump()
+    d.pop("password", None)
+    return d
 
 
 @api.post("/analyses/{analysis_id}/post")
 async def manual_post(analysis_id: str):
-    """Manually post any unposted issues to Frame.io."""
     a = await _load(analysis_id)
     if not a:
         raise HTTPException(404, "Not found")
-    if not a.frameio_asset_id:
-        raise HTTPException(400, "No Frame.io asset associated with this analysis.")
+    if not a.frameio_url or not frameio_service.is_share_link(a.frameio_url):
+        raise HTTPException(
+            400, "Only Frame.io share links support guest comment posting."
+        )
 
-    adobe_token = await adobe_oauth.get_valid_access_token(db)
-    adobe_account_id = (
-        await adobe_oauth.get_account_id(adobe_token) if adobe_token else None
+    unposted_idx = [i for i, x in enumerate(a.issues) if not x.posted_to_frameio]
+    if not unposted_idx:
+        return {"posted": 0, "total_posted": a.posted_count}
+
+    payloads = [
+        {
+            "timestamp_sec": a.issues[i].timestamp_sec,
+            "text": _format_comment(a.issues[i]),
+        }
+        for i in unposted_idx
+    ]
+    result = await frameio_service.submit_guest_comments(
+        a.frameio_url, a.password, payloads
     )
-    fps = a.video_fps or 24.0
-
-    posted = 0
-    updated_issues: List[Issue] = []
-    for issue in a.issues:
-        if issue.posted_to_frameio:
-            updated_issues.append(issue)
-            continue
-        text = _format_comment(issue)
-        ts_sec = issue.timestamp_sec if issue.timestamp_sec >= 0 else None
-        if adobe_token and adobe_account_id:
-            ts_frames = int(round(ts_sec * fps)) if ts_sec is not None else None
-            res = await adobe_oauth.post_comment_v4(
-                adobe_token, adobe_account_id, a.frameio_asset_id, text,
-                timestamp_frames=ts_frames,
-            )
-        else:
-            res = await frameio_service.post_comment(
-                a.frameio_asset_id, text, timestamp_seconds=ts_sec,
-            )
-        if res.get("ok"):
-            issue.posted_to_frameio = True
-            cobj = res.get("comment") or {}
-            issue.frameio_comment_id = (
-                cobj.get("id") or (cobj.get("data") or {}).get("id")
-            )
-            posted += 1
-        updated_issues.append(issue)
-
-    a.issues = updated_issues
+    flags = result.get("posted_flags") or []
+    for j, idx in enumerate(unposted_idx):
+        if j < len(flags) and flags[j]:
+            a.issues[idx].posted_to_frameio = True
     a.posted_count = sum(1 for i in a.issues if i.posted_to_frameio)
     await _save(a)
-    return {"posted": posted, "total_posted": a.posted_count}
+    return {
+        "posted": result.get("posted", 0),
+        "total_posted": a.posted_count,
+        "error": result.get("error"),
+    }
 
 
 @api.get("/analyses/{analysis_id}/csv")
 async def export_csv(analysis_id: str):
-    """Download all detected issues as a CSV."""
     from fastapi.responses import StreamingResponse
     import csv as csv_mod
     import io
@@ -571,13 +450,13 @@ async def export_csv(analysis_id: str):
             i.source_text,
             "yes" if i.posted_to_frameio else "no",
         ])
-
     buf.seek(0)
-    filename = f"proofio-{analysis_id[:8]}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="proofio-{analysis_id[:8]}.csv"'
+        },
     )
 
 

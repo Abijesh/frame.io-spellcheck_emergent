@@ -38,7 +38,9 @@ class Analysis(BaseModel):
     frameio_asset_id: Optional[str] = None
     video_filename: Optional[str] = None
     transcript: Optional[str] = None
+    password: Optional[str] = None
     auto_post: bool = True
+    password_required: bool = False
 
     status: str = "queued"  # queued | downloading | extracting | analyzing | posting | done | failed
     progress: int = 0  # 0..100

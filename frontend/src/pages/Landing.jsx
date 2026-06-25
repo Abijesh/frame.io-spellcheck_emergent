@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye } from "lucide-react";
+import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,13 +25,13 @@ export default function Landing() {
   const navigate = useNavigate();
   const [url, setUrl] = useState("");
   const [transcript, setTranscript] = useState("");
+  const [password, setPassword] = useState("");
   const [autoPost, setAutoPost] = useState(true);
   const [videoFile, setVideoFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [cfg, setCfg] = useState({
-    frameio_configured: false,
     llm_configured: false,
-    adobe_connected: false,
+    guest_name: "Spellchecker",
   });
 
   useEffect(() => {
@@ -49,6 +49,7 @@ export default function Landing() {
       const analysis = await createAnalysis({
         frameioUrl: url || null,
         transcript: transcript || null,
+        password: password || null,
         autoPost,
         videoFile,
       });
@@ -124,32 +125,25 @@ export default function Landing() {
                     Start a review
                   </h2>
                   <span
-                    className={`font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border ${
-                      cfg.adobe_connected
-                        ? "border-emerald-700 text-emerald-500"
-                        : "border-amber-700 text-amber-500"
-                    }`}
-                    data-testid="config-badge"
+                    className="font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border border-brand-500 text-brand-500"
+                    data-testid="guest-badge"
                   >
-                    {cfg.adobe_connected ? "Adobe connected" : "Sign in needed"}
+                    Guest: {cfg.guest_name || "Spellchecker"}
                   </span>
                 </div>
 
-                {!cfg.adobe_connected && (
-                  <div
-                    data-testid="connect-hint"
-                    className="border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-200/90 leading-relaxed"
-                  >
-                    <strong className="text-amber-400">
-                      Sign in with Adobe first.
-                    </strong>{" "}
-                    Frame.io requires Adobe authentication to auto-post
-                    comments on V4 shares. The analysis (OCR + grammar) still
-                    works without it, but comments will not be posted. Click{" "}
-                    <span className="font-mono-tech">Connect Frame.io</span> in
-                    the top-right.
-                  </div>
-                )}
+                <div
+                  data-testid="guest-hint"
+                  className="border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-400 leading-relaxed"
+                >
+                  Comments will be posted on the Frame.io share as a guest
+                  named{" "}
+                  <span className="text-brand-500 font-mono-tech">
+                    {cfg.guest_name || "Spellchecker"}
+                  </span>
+                  . No sign-in required — works with any public Frame.io share
+                  link that allows commenting.
+                </div>
 
                 <div className="space-y-2">
                   <Label
@@ -165,6 +159,25 @@ export default function Landing() {
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
                     placeholder="https://app.frame.io/player/…"
+                    className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono-tech text-sm h-11"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="share-password"
+                    className="font-mono-tech text-xs uppercase tracking-widest text-zinc-500"
+                  >
+                    <Lock className="inline w-3 h-3 mr-1" />
+                    Share password (only if protected)
+                  </Label>
+                  <Input
+                    id="share-password"
+                    data-testid="share-password-input"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Leave empty if the share has no password"
                     className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 font-mono-tech text-sm h-11"
                   />
                 </div>

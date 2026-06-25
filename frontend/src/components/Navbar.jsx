@@ -1,11 +1,5 @@
-import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Film, Link2, CheckCircle2, LogOut } from "lucide-react";
-import { toast } from "sonner";
-
-import { Button } from "@/components/ui/button";
-import { getConfig, API } from "@/lib/api";
-import axios from "axios";
+import { Film } from "lucide-react";
 
 const NavLink = ({ to, children, testid }) => {
   const { pathname } = useLocation();
@@ -24,35 +18,6 @@ const NavLink = ({ to, children, testid }) => {
 };
 
 export default function Navbar() {
-  const [cfg, setCfg] = useState({ adobe_connected: false, adobe_user: null });
-
-  const load = () => getConfig().then(setCfg).catch(() => {});
-
-  useEffect(() => {
-    load();
-    // detect ?adobe_connected=1 from OAuth callback
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("adobe_connected") === "1") {
-      toast.success("Frame.io connected.");
-      window.history.replaceState({}, "", window.location.pathname);
-      load();
-    }
-    if (params.get("adobe_error")) {
-      toast.error("Frame.io connect failed: " + params.get("adobe_error"));
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-  }, []);
-
-  const onConnect = () => {
-    window.location.href = `${API}/auth/adobe/login`;
-  };
-
-  const onDisconnect = async () => {
-    await axios.post(`${API}/auth/adobe/logout`);
-    toast.success("Disconnected");
-    load();
-  };
-
   return (
     <nav
       data-testid="navbar"
@@ -61,7 +26,10 @@ export default function Navbar() {
       <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
         <Link to="/" data-testid="navbar-logo" className="flex items-center gap-2 group">
           <div className="w-8 h-8 border border-brand-500 flex items-center justify-center group-hover:bg-brand-500 transition-colors duration-200">
-            <Film className="w-4 h-4 text-brand-500 group-hover:text-zinc-950" strokeWidth={2} />
+            <Film
+              className="w-4 h-4 text-brand-500 group-hover:text-zinc-950"
+              strokeWidth={2}
+            />
           </div>
           <span className="font-display font-black text-lg tracking-tighter">
             PROOF<span className="text-brand-500">.IO</span>
@@ -70,25 +38,15 @@ export default function Navbar() {
         <div className="flex items-center gap-8">
           <NavLink to="/" testid="nav-home">New analysis</NavLink>
           <NavLink to="/history" testid="nav-history">History</NavLink>
-          {cfg.adobe_connected ? (
-            <Button
-              onClick={onDisconnect}
-              variant="ghost"
-              data-testid="disconnect-frameio-btn"
-              className="text-xs uppercase tracking-widest font-mono-tech text-emerald-500 hover:text-brand-500 hover:bg-transparent rounded-none"
-            >
-              <CheckCircle2 className="w-4 h-4 mr-1" /> Connected
-              <LogOut className="w-3 h-3 ml-2 opacity-60" />
-            </Button>
-          ) : (
-            <Button
-              onClick={onConnect}
-              data-testid="connect-frameio-btn"
-              className="bg-brand-500 hover:bg-brand-400 text-zinc-950 border-0 h-9 px-4 font-mono-tech uppercase tracking-widest text-[10px] rounded-none"
-            >
-              <Link2 className="w-3 h-3 mr-2" /> Connect Frame.io
-            </Button>
-          )}
+          <a
+            href="https://developer.frame.io"
+            target="_blank"
+            rel="noreferrer"
+            className="text-sm text-zinc-500 hover:text-white transition-colors"
+            data-testid="nav-docs"
+          >
+            Docs
+          </a>
         </div>
       </div>
     </nav>

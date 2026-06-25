@@ -5,10 +5,11 @@ export const API = `${BACKEND_URL}/api`;
 
 export const api = axios.create({ baseURL: API });
 
-export const createAnalysis = async ({ frameioUrl, transcript, autoPost, videoFile }) => {
+export const createAnalysis = async ({ frameioUrl, transcript, password, autoPost, videoFile }) => {
   const form = new FormData();
   if (frameioUrl) form.append("frameio_url", frameioUrl);
   if (transcript) form.append("transcript", transcript);
+  if (password) form.append("password", password);
   form.append("auto_post", autoPost ? "true" : "false");
   if (videoFile) form.append("video", videoFile);
   const { data } = await api.post("/analyses", form, {

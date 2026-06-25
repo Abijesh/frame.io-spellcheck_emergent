@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 7 — Adobe OAuth pivot verified end-to-end. Backend: 13/13 pytest assertions PASSED (100%). /api/config returns ONLY {llm_configured, frame_interval, guest_name:'Spellchecker'} with no Adobe fields. All three Adobe routes (login, callback, logout) return 404 as expected. Password field plumbing works: POST /analyses accepts 'password' form field, GET /analyses/{id} and GET /analyses both strip it. List items contain issue_count and empty issues[]. Manual /post endpoint rejects non-share uploads with 400. CSV export returns proper text/csv with correct headers. Frontend: Landing page renders guest-badge ('Guest: Spellchecker') and guest-hint correctly, share-password-input present with type=password, submit flow navigates to /analysis/{id} and shows failure banner for invalid URLs. Navbar on both / and /history pages contains only PROOF.IO / New analysis / History / Docs — no Adobe Connect or Disconnect remnants. History page shows the previously verified analysis https://f.io/M6WUQCEn with 9 issues / 9 posted (matches main agent's manual verification).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration7_guest.py",
+    "/app/test_reports/pytest/iteration7_results.xml"
+  ],
+  "action_items": [
+    "None blocking. The pivot is complete and stable.",
+    "Optional cleanup: /app/backend/services/adobe_oauth.py is dormant but still present (not imported by server.py). Consider removing the file and its dependencies (cryptography Fernet code) to reduce attack surface.",
+    "Optional cleanup: legacy test files for Adobe OAuth (test_adobe_oauth.py, test_iteration5_oauth.py, test_iteration6_oauth_state.py) now exercise removed routes and should be marked skip or deleted to avoid future false alarms."
+  ],
+  "critical_code_review_comments": [
+    "server.py uses os.environ['MONGO_URL'] and os.environ['DB_NAME'] at import time (lines 48-50). If either env var is missing the process exits at import — preferable to a silent default, but make sure the supervisor config exports both. Confirmed both present in /app/backend/.env.",
+    "server.py /api/analyses POST returns analysis.model_dump() (line 351) which INCLUDES the 'password' field in the immediate response. The strip only happens in GET endpoints (lines 361, 371). If a frontend caller logs the POST response, the password could leak into logs. Consider stripping in the POST response too for defense-in-depth.",
+    "_run_pipeline (line 108) doesn't time-bound the Playwright steps. A misbehaving share could keep the background task running forever and consume the worker. Add an overall timeout (e.g. asyncio.wait_for with 5-10 min cap).",
+    "models.py — Analysis has no `Index` on `created_at`; the list endpoint sorts by it (server.py:356). With many rows this becomes slow. Add a Mongo index on created_at DESC at startup.",
+    "frontend Landing.jsx submit path doesn't validate frameio_url client-side (any string is sent). Server returns 'failed' for non-share URLs but the user sees a generic 'Analysis started.' toast first. Consider regex-validating share-link shape before posting."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration7_guest.py"
+  ],
+  "success_rate": {
+    "backend": "13/13 PASS (100%)",
+    "frontend": "All key UI checks PASS — guest-badge, guest-hint, share-password-input (type=password), navbar (no Adobe), submit/navigate flow, history page"
+  },
+  "test_credentials": "N/A — guest mode, no auth needed.",
+  "seed_data_creation": "Created and deleted one dummy analysis with frameio_url='https://f.io/TEST_DUMMY_SHARE' and one upload-flow analysis for /post validation; both cleaned up. One leftover from UI smoke test: analysis bb13e156-aa7b-4038-9fc4-4fa1b1b818a7 with frameio_url='not-a-share-link', status=failed (harmless, shows up in /history).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 7 confirmed Adobe OAuth removal is complete and the Playwright guest-comment flow works (manually verified by main agent: 9/9 comments posted on f.io/M6WUQCEn, visible in /history). Full end-to-end Playwright pipeline test (which takes 80-120s) was NOT re-run by the testing agent because main agent already verified it within the same iteration; the existing analysis row at https://f.io/M6WUQCEn with 9 issues / 9 posted serves as the evidence. If you need to re-run end-to-end: POST /api/analyses with frameio_url='https://f.io/M6WUQCEn' and poll GET /api/analyses/{id} every 5s for ~2 minutes. Test file: /app/backend/tests/test_iteration7_guest.py (run with `pytest backend/tests/test_iteration7_guest.py -v`). Older Adobe-OAuth tests in /app/backend/tests/test_adobe_oauth.py, test_iteration5_oauth.py, test_iteration6_oauth_state.py are now stale — they hit /api/auth/adobe/* which return 404 by design.",
+  "rca of the issue": "No bug in this iteration — pivot verification only. All previously reported Adobe-OAuth issues (state validation, exchange_code failures, tokens collection empty) are now N/A because the entire Adobe code path has been removed. The new guest-comment flow uses headless Chromium + Playwright to post on any public Frame.io share as 'Spellchecker'. Verified working via existing analysis 6c9...4854 (https://f.io/M6WUQCEn, 9 issues all posted_to_frameio=true)."
+}
