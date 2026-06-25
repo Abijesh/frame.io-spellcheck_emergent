@@ -531,6 +531,49 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def ensure_runtime_deps():
+    """Self-heal Playwright + ffmpeg on first boot so pod recycles don't
+    silently break the analysis pipeline."""
+    import shutil as _sh
+    import subprocess
+
+    # ffmpeg (OS-level, comes from apt)
+    if not _sh.which("ffmpeg"):
+        try:
+            subprocess.run(
+                ["apt-get", "install", "-y", "ffmpeg"],
+                check=False, timeout=120,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.warning("ffmpeg install at startup failed: %s", exc)
+
+    # Playwright chromium browser
+    pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    chromium_ok = False
+    if pw_path and os.path.isdir(pw_path):
+        for entry in os.listdir(pw_path):
+            if entry.startswith("chromium_headless_shell-"):
+                shell = os.path.join(
+                    pw_path, entry, "chrome-linux", "headless_shell"
+                )
+                if os.path.exists(shell):
+                    chromium_ok = True
+                    break
+    if not chromium_ok:
+        try:
+            env = {**os.environ}
+            subprocess.run(
+                ["python3", "-m", "playwright", "install", "chromium"],
+                check=False, timeout=300, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            logger.info("Playwright chromium installed at startup")
+        except Exception as exc:
+            logger.warning("Playwright install at startup failed: %s", exc)
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
