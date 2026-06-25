@@ -132,19 +132,6 @@ export default function Landing() {
                   </span>
                 </div>
 
-                <div
-                  data-testid="guest-hint"
-                  className="border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-400 leading-relaxed"
-                >
-                  Comments will be posted on the Frame.io share as a guest
-                  named{" "}
-                  <span className="text-brand-500 font-mono-tech">
-                    {cfg.guest_name || "Spellchecker"}
-                  </span>
-                  . No sign-in required — works with any public Frame.io share
-                  link that allows commenting.
-                </div>
-
                 <div className="space-y-2">
                   <Label
                     htmlFor="frameio-url"

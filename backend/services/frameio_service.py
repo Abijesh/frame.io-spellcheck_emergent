@@ -1,28 +1,6 @@
-"""Frame.io public share interaction via Playwright (no Adobe OAuth needed).
-
-Two phases per analysis:
-  1. resolve_share_video(url, password) -> {video_url, file_id, password_required, error}
-     Opens the share page, fills password if needed, returns the signed CDN URL
-     for the <video> element so we can download for OCR.
-
-  2. submit_guest_comments(url, password, comments) -> {posted, failed, error}
-     Reopens the share page (a separate browser session), accepts the guest
-     name/email dialog once with our fixed identity, then seeks the video to
-     each comment's timestamp and submits the text.
-
-Selectors (verified on next.frame.io 2026):
-  password input  : input[type=password]
-  password submit : button:has-text("Submit") | button[type=submit]
-  video player    : video[data-testid="video-player"]
-  composer        : [data-testid="create-comment-comment-composer"]
-  submit comment  : [data-testid="composer-submit-button"]
-  name field      : input[aria-label="Your name"]
-  email field     : input[aria-label="Your email"]
-  save button     : role=dialog -> button:has-text("Save")
-"""
+"""Frame.io public share interaction via Playwright (guest mode)."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -39,6 +17,10 @@ ASSET_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Empirically measured from Frame.io player keyboard shortcuts (2026 UI):
+COARSE_STEP_SEC = 1.0 / 3.0   # Shift+ArrowRight ≈ 0.333 s
+FINE_STEP_SEC = 1.0 / 30.0    # ArrowRight ≈ one frame (~0.033 s at 30 fps)
+
 
 def _launch_args():
     return ["--no-sandbox", "--disable-dev-shm-usage"]
@@ -54,15 +36,19 @@ async def _new_page(p):
     return browser, page
 
 
+def is_share_link(url: str) -> bool:
+    if not url:
+        return False
+    return bool(re.search(r"(f\.io/|next\.frame\.io/share/)", url, re.IGNORECASE))
+
+
 async def _maybe_enter_password(page, password: Optional[str]) -> dict:
-    """Returns {'ok': bool, 'password_required': bool, 'error': str|None}."""
     try:
         pw_input = await page.query_selector("input[type=password]")
     except Exception:
         pw_input = None
     if not pw_input:
         return {"ok": True, "password_required": False, "error": None}
-
     if not password:
         return {
             "ok": False,
@@ -70,26 +56,88 @@ async def _maybe_enter_password(page, password: Optional[str]) -> dict:
             "error": "This Frame.io share is password-protected.",
         }
     await pw_input.fill(password)
-    # Submit by Enter (works across Frame.io UI variants)
     await page.keyboard.press("Enter")
     try:
         await page.wait_for_selector(
             "video[data-testid='video-player']", timeout=10000
         )
     except Exception:
-        # Wrong password → password field still visible
-        still_there = await page.query_selector("input[type=password]")
-        if still_there:
-            return {
-                "ok": False,
-                "password_required": True,
-                "error": "Wrong password.",
-            }
+        if await page.query_selector("input[type=password]"):
+            return {"ok": False, "password_required": True, "error": "Wrong password."}
     return {"ok": True, "password_required": False, "error": None}
 
 
+async def _wait_for_player_and_composer(page, max_seconds: int = 25) -> bool:
+    for _ in range(max_seconds * 2):
+        v = await page.query_selector("video[data-testid='video-player']")
+        c = await page.query_selector("[data-testid=create-comment-comment-composer]")
+        if v and c:
+            return True
+        await page.wait_for_timeout(500)
+    return False
+
+
+async def _dismiss_play_overlay(page) -> None:
+    """Click the big play overlay so the player becomes interactive, then pause."""
+    try:
+        await page.locator("[data-testid=overlay-play-button]").click(timeout=4000)
+        await page.wait_for_timeout(500)
+        await page.keyboard.press("k")  # pause
+        await page.wait_for_timeout(250)
+    except Exception:
+        pass
+
+
+async def _current_time(page) -> float:
+    try:
+        return float(await page.evaluate(
+            "() => document.querySelector(\"video[data-testid='video-player']\").currentTime"
+        ))
+    except Exception:
+        return 0.0
+
+
+async def _seek_forward(page, delta_sec: float) -> None:
+    """Step the playhead forward by delta_sec using Frame.io's keyboard shortcuts.
+
+    Shift+ArrowRight ≈ 0.333s, ArrowRight ≈ 1 frame (~0.033s).
+    We focus the playhead slider so the keys go to the player, not the page.
+    """
+    if delta_sec <= 0:
+        return
+    try:
+        await page.locator("[data-testid=playhead]").focus()
+    except Exception:
+        # fall back: focus the video element
+        try:
+            await page.locator("video[data-testid='video-player']").focus()
+        except Exception:
+            pass
+
+    coarse = int(delta_sec // COARSE_STEP_SEC)
+    remainder = delta_sec - coarse * COARSE_STEP_SEC
+    fine = int(round(remainder / FINE_STEP_SEC))
+    for _ in range(coarse):
+        await page.keyboard.press("Shift+ArrowRight")
+    for _ in range(fine):
+        await page.keyboard.press("ArrowRight")
+    await page.wait_for_timeout(120)
+
+
+async def _seek_to_start(page) -> None:
+    """Reset playhead to 0. Home doesn't work; we step backwards aggressively."""
+    try:
+        await page.locator("[data-testid=playhead]").focus()
+    except Exception:
+        pass
+    # 200 Shift+Left presses is enough to rewind any short clip to 0
+    for _ in range(200):
+        await page.keyboard.press("Shift+ArrowLeft")
+    await page.wait_for_timeout(150)
+
+
 async def resolve_share_video(url: str, password: Optional[str] = None) -> dict:
-    """Returns {video_url, file_id, password_required, error}."""
+    """Open the share page, fill password if needed, return signed video URL."""
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -105,7 +153,7 @@ async def resolve_share_video(url: str, password: Optional[str] = None) -> dict:
         browser, page = await _new_page(p)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
 
             pw_res = await _maybe_enter_password(page, password)
             if not pw_res["ok"]:
@@ -113,9 +161,8 @@ async def resolve_share_video(url: str, password: Optional[str] = None) -> dict:
                 out["error"] = pw_res["error"]
                 return out
 
-            # Give the SPA generous time to render the video element
             video_src = None
-            for _ in range(20):  # up to ~30s
+            for _ in range(20):
                 try:
                     video_src = await page.eval_on_selector(
                         "video[data-testid='video-player'], video",
@@ -125,17 +172,16 @@ async def resolve_share_video(url: str, password: Optional[str] = None) -> dict:
                     video_src = None
                 if video_src:
                     break
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(1000)
 
             if not video_src:
                 out["error"] = "Video player did not load on the share page."
                 return out
 
             out["video_url"] = video_src
-            final_url = page.url
-            ids = ASSET_ID_RE.findall(final_url)
+            ids = ASSET_ID_RE.findall(page.url)
             out["file_id"] = ids[-1] if ids else None
-            if not out["file_id"] and video_src:
+            if not out["file_id"]:
                 src_ids = ASSET_ID_RE.findall(video_src)
                 out["file_id"] = src_ids[0] if src_ids else None
             return out
@@ -148,7 +194,6 @@ async def resolve_share_video(url: str, password: Optional[str] = None) -> dict:
 
 
 async def _accept_guest_identity_if_prompted(page) -> bool:
-    """If the 'Let others know who you are' dialog is open, fill name/email and save."""
     try:
         dialog = await page.wait_for_selector("[role=dialog]", timeout=2000)
     except Exception:
@@ -161,23 +206,12 @@ async def _accept_guest_identity_if_prompted(page) -> bool:
     try:
         await page.fill("input[aria-label='Your name']", GUEST_NAME)
         await page.fill("input[aria-label='Your email']", GUEST_EMAIL)
-        # Save button inside the dialog
         await page.locator("[role=dialog] button:has-text('Save')").first.click()
-        await page.wait_for_timeout(1200)
+        await page.wait_for_timeout(900)
         return True
     except Exception as exc:
-        logger.warning("guest identity dialog handling failed: %s", exc)
+        logger.warning("guest identity dialog failed: %s", exc)
         return False
-
-
-async def _seek(page, seconds: float) -> None:
-    s = max(float(seconds), 0.0)
-    await page.evaluate(
-        "(t) => { const v = document.querySelector(\"video[data-testid='video-player']\") "
-        "|| document.querySelector('video'); if (v) { v.currentTime = t; }}",
-        s,
-    )
-    await page.wait_for_timeout(350)
 
 
 async def _type_and_submit(page, text: str) -> bool:
@@ -186,16 +220,14 @@ async def _type_and_submit(page, text: str) -> bool:
         await composer.click(timeout=4000)
     except Exception:
         return False
-    await page.keyboard.press("Control+A")
-    await page.keyboard.press("Delete")
-    await page.keyboard.type(text, delay=8)
-    await page.wait_for_timeout(250)
+    await page.keyboard.type(text, delay=4)
     submit = page.locator("[data-testid=composer-submit-button]")
     try:
-        await submit.click(timeout=4000)
+        await submit.click(timeout=3000)
+        return True
     except Exception:
         await page.keyboard.press("Control+Enter")
-    return True
+        return True
 
 
 async def submit_guest_comments(
@@ -205,93 +237,85 @@ async def submit_guest_comments(
 ) -> dict:
     """`comments`: list of {timestamp_sec: float, text: str}.
 
-    Returns {posted: int, failed: int, error: str|None, password_required: bool}.
+    Posts in ascending-timestamp order so we only ever seek forward.
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
         return {"posted": 0, "failed": len(comments), "error": "playwright not installed"}
 
+    n = len(comments)
     result = {
         "posted": 0,
         "failed": 0,
         "error": None,
         "password_required": False,
-        "posted_flags": [False] * len(comments),
+        "posted_flags": [False] * n,
     }
+
+    # Sort by timestamp (negative = transcript, treat as 0) but keep original index
+    indexed = list(enumerate(comments))
+    indexed.sort(key=lambda x: max(float(x[1].get("timestamp_sec") or 0.0), 0.0))
 
     async with async_playwright() as p:
         browser, page = await _new_page(p)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(3000)
 
             pw_res = await _maybe_enter_password(page, password)
             if not pw_res["ok"]:
                 result["error"] = pw_res["error"]
                 result["password_required"] = pw_res["password_required"]
-                result["failed"] = len(comments)
+                result["failed"] = n
                 return result
 
-            # Wait for the SPA to render video + composer (up to ~30s)
-            ready = False
-            for _ in range(20):
-                try:
-                    has_video = await page.query_selector(
-                        "video[data-testid='video-player']"
-                    )
-                    has_composer = await page.query_selector(
-                        "[data-testid=create-comment-comment-composer]"
-                    )
-                    if has_video and has_composer:
-                        ready = True
-                        break
-                except Exception:
-                    pass
-                await page.wait_for_timeout(1500)
-            if not ready:
-                result["error"] = "Video / comment composer did not load."
-                result["failed"] = len(comments)
+            if not await _wait_for_player_and_composer(page):
+                result["error"] = "Video or comment composer did not load."
+                result["failed"] = n
                 return result
 
+            await _dismiss_play_overlay(page)
+
+            current_t = await _current_time(page)
             identity_saved = False
 
-            for idx, c in enumerate(comments):
+            for orig_idx, c in indexed:
                 try:
-                    ts = c.get("timestamp_sec", 0.0)
-                    if ts is None or ts < 0:
-                        ts = 0.0
-                    await _seek(page, ts)
+                    target = max(float(c.get("timestamp_sec") or 0.0), 0.0)
+                    # Seek forward to target. If we've already passed it
+                    # (shouldn't, since sorted) just skip seeking.
+                    delta = target - current_t
+                    if delta > 0:
+                        await _seek_forward(page, delta)
+                        current_t = await _current_time(page)
+
                     ok = await _type_and_submit(page, c["text"])
                     if not ok:
                         result["failed"] += 1
                         continue
 
-                    # The very first submit triggers the guest identity dialog.
                     if not identity_saved:
-                        saved = await _accept_guest_identity_if_prompted(page)
-                        identity_saved = saved or identity_saved
+                        if await _accept_guest_identity_if_prompted(page):
+                            identity_saved = True
 
-                    # Small wait + visual hint that submission completed:
-                    # the composer should clear and a new comment row appears.
-                    await page.wait_for_timeout(900)
+                    await page.wait_for_timeout(450)
                     result["posted"] += 1
-                    result["posted_flags"][idx] = True
+                    result["posted_flags"][orig_idx] = True
                 except Exception as exc:
-                    logger.warning("Comment #%s failed: %s", idx, exc)
+                    logger.warning("Comment #%s failed: %s", orig_idx, exc)
                     result["failed"] += 1
 
             return result
         except Exception as exc:
             logger.exception("submit_guest_comments error: %s", exc)
             result["error"] = str(exc)
-            result["failed"] = len(comments) - result["posted"]
+            result["failed"] = n - result["posted"]
             return result
         finally:
             await browser.close()
 
 
-# ---- video download (kept identical to previous implementation) ----
 async def download_video(url: str, dest_path: str) -> bool:
     try:
         async with httpx.AsyncClient(
@@ -307,11 +331,3 @@ async def download_video(url: str, dest_path: str) -> bool:
     except Exception as exc:
         logger.exception("download_video error: %s", exc)
         return False
-
-
-def is_share_link(url: str) -> bool:
-    if not url:
-        return False
-    return bool(
-        re.search(r"(f\.io/|next\.frame\.io/share/)", url, re.IGNORECASE)
-    )
