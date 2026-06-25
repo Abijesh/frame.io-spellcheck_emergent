@@ -348,7 +348,9 @@ async def create_analysis(
             shutil.copyfileobj(video.file, out)
 
     background.add_task(_run_pipeline, analysis.id, video_local_path)
-    return analysis.model_dump()
+    d = analysis.model_dump()
+    d.pop("password", None)
+    return d
 
 
 @api.get("/analyses")
