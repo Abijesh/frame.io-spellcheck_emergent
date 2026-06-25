@@ -33,6 +33,13 @@ export const postComments = async (id) => {
   return data;
 };
 
+export const postSingleIssue = async (analysisId, issueId) => {
+  const { data } = await api.post(
+    `/analyses/${analysisId}/issues/${issueId}/post`
+  );
+  return data;
+};
+
 export const deleteAnalysis = async (id) => {
   const { data } = await api.delete(`/analyses/${id}`);
   return data;

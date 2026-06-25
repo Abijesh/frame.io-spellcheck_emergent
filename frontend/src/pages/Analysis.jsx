@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { getAnalysis, postComments, API } from "@/lib/api";
+import { getAnalysis, postComments, postSingleIssue, API } from "@/lib/api";
 
 const formatTime = (sec) => {
   if (sec === undefined || sec === null || sec < 0) return "Script";
@@ -277,7 +277,17 @@ export default function Analysis() {
               .slice()
               .sort((a, b) => a.timestamp_sec - b.timestamp_sec)
               .map((issue, idx) => (
-                <IssueRow key={issue.id || idx} issue={issue} />
+                <IssueRow
+                  key={issue.id || idx}
+                  issue={issue}
+                  analysisId={id}
+                  canPost={
+                    analysis.status === "done" &&
+                    analysis.frameio_url &&
+                    analysis.frameio_url.match(/(f\.io\/|next\.frame\.io\/share\/)/)
+                  }
+                  onPosted={() => load()}
+                />
               ))}
           </div>
         )}
@@ -301,69 +311,114 @@ const Stat = ({ label, value, accent }) => (
   </div>
 );
 
-const IssueRow = ({ issue }) => (
-  <div
-    data-testid="issue-row"
-    className="p-6 hover:bg-zinc-900/30 transition-colors duration-200 flex gap-6"
-  >
-    <div className="shrink-0 w-20">
-      <div className="font-mono-tech text-sm text-brand-500 flex items-center gap-1">
-        <Clock className="w-3 h-3" />
-        {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
-      </div>
-      <div className="font-mono-tech text-[10px] text-zinc-600 mt-1">
-        {issue.timestamp_sec >= 0 ? `${Math.round(issue.timestamp_sec)}s` : "Transcript"}
-      </div>
-    </div>
+const IssueRow = ({ issue, analysisId, canPost, onPosted }) => {
+  const [posting, setPosting] = useState(false);
 
-    <div className="flex-1 space-y-2 min-w-0">
-      <div className="flex items-center gap-2 flex-wrap">
-        <Badge
-          className={`rounded-none font-mono-tech text-[10px] uppercase tracking-widest border ${
-            TYPE_COLOR[issue.type] || TYPE_COLOR.spelling
-          }`}
-        >
-          {issue.type}
-        </Badge>
-        <span
-          className={`font-mono-tech text-[10px] uppercase tracking-widest px-2 py-0.5 border ${
-            SEVERITY_COLOR[issue.severity] || SEVERITY_COLOR.medium
-          }`}
-        >
-          {issue.severity}
-        </span>
-        {issue.posted_to_frameio && (
-          <span className="font-mono-tech text-[10px] uppercase tracking-widest text-emerald-500 flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3" /> Posted
+  const handlePost = async () => {
+    setPosting(true);
+    try {
+      const res = await postSingleIssue(analysisId, issue.id);
+      if (res.posted) {
+        toast.success("Posted to Frame.io.");
+        onPosted?.();
+      } else if (res.already) {
+        toast.info("Already posted.");
+      } else {
+        toast.error(res.error || "Failed to post.");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to post.");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid="issue-row"
+      className="p-6 hover:bg-zinc-900/30 transition-colors duration-200 flex gap-6"
+    >
+      <div className="shrink-0 w-20">
+        <div className="font-mono-tech text-sm text-brand-500 flex items-center gap-1">
+          <Clock className="w-3 h-3" />
+          {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
+        </div>
+        <div className="font-mono-tech text-[10px] text-zinc-600 mt-1">
+          {issue.timestamp_sec >= 0 ? `${Math.round(issue.timestamp_sec)}s` : "Transcript"}
+        </div>
+      </div>
+
+      <div className="flex-1 space-y-2 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Badge
+            className={`rounded-none font-mono-tech text-[10px] uppercase tracking-widest border ${
+              TYPE_COLOR[issue.type] || TYPE_COLOR.spelling
+            }`}
+          >
+            {issue.type}
+          </Badge>
+          <span
+            className={`font-mono-tech text-[10px] uppercase tracking-widest px-2 py-0.5 border ${
+              SEVERITY_COLOR[issue.severity] || SEVERITY_COLOR.medium
+            }`}
+          >
+            {issue.severity}
           </span>
-        )}
-      </div>
-
-      <div className="flex items-center gap-3 flex-wrap text-base">
-        <span className="line-through text-zinc-500 font-medium break-all">
-          {issue.original || "—"}
-        </span>
-        {issue.suggestion && (
-          <>
-            <span className="text-zinc-700">→</span>
-            <span className="text-white font-medium break-all">
-              {issue.suggestion}
+          {issue.posted_to_frameio && (
+            <span className="font-mono-tech text-[10px] uppercase tracking-widest text-emerald-500 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3" /> Posted
             </span>
-          </>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3 flex-wrap text-base">
+          <span className="line-through text-zinc-500 font-medium break-all">
+            {issue.original || "—"}
+          </span>
+          {issue.suggestion && (
+            <>
+              <span className="text-zinc-700">→</span>
+              <span className="text-white font-medium break-all">
+                {issue.suggestion}
+              </span>
+            </>
+          )}
+        </div>
+
+        {issue.explanation && (
+          <p className="text-sm text-zinc-500 leading-relaxed">
+            {issue.explanation}
+          </p>
+        )}
+
+        {issue.source_text && issue.source_text !== issue.original && (
+          <p className="text-xs text-zinc-700 font-mono-tech">
+            {`In: "${issue.source_text}"`}
+          </p>
         )}
       </div>
 
-      {issue.explanation && (
-        <p className="text-sm text-zinc-500 leading-relaxed">
-          {issue.explanation}
-        </p>
-      )}
-
-      {issue.source_text && issue.source_text !== issue.original && (
-        <p className="text-xs text-zinc-700 font-mono-tech">
-          {`In: "${issue.source_text}"`}
-        </p>
+      {canPost && !issue.posted_to_frameio && (
+        <div className="shrink-0 self-start">
+          <Button
+            size="sm"
+            onClick={handlePost}
+            disabled={posting}
+            data-testid={`post-issue-btn-${issue.id}`}
+            className="bg-brand-500 hover:bg-brand-400 text-zinc-950 rounded-none font-mono-tech text-[10px] uppercase tracking-widest h-8 px-3"
+          >
+            {posting ? (
+              <>
+                <Loader2 className="w-3 h-3 mr-1 animate-spin" /> Posting
+              </>
+            ) : (
+              <>
+                <Send className="w-3 h-3 mr-1" /> Post
+              </>
+            )}
+          </Button>
+        </div>
       )}
     </div>
-  </div>
-);
+  );
+};

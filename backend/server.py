@@ -12,6 +12,7 @@ No Adobe OAuth. Pipeline per analysis:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import shutil
@@ -192,32 +193,47 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
         )
 
         all_issues: List[Issue] = []
-        for idx, (ts, fpath) in enumerate(frames):
-            errs = await ai_service.analyze_frame(fpath)
-            for e in errs:
-                all_issues.append(
-                    Issue(
-                        timestamp_sec=float(ts),
-                        type=e.get("type", "spelling"),
-                        original=e.get("original", ""),
-                        suggestion=e.get("suggestion", ""),
-                        explanation=e.get("explanation", ""),
-                        source_text=e.get("source_text", ""),
-                        severity=_severity_for(e.get("type", "spelling")),
+        completed = 0
+        sem = asyncio.Semaphore(3)  # cap concurrent Gemini calls
+
+        async def _analyze_one(ts: float, fpath: str):
+            async with sem:
+                errs = await ai_service.analyze_frame(fpath)
+            return ts, errs
+
+        async def _run_with_progress():
+            nonlocal completed
+            tasks = [
+                asyncio.create_task(_analyze_one(ts, fp)) for ts, fp in frames
+            ]
+            for fut in asyncio.as_completed(tasks):
+                ts, errs = await fut
+                for e in errs:
+                    all_issues.append(
+                        Issue(
+                            timestamp_sec=float(ts),
+                            type=e.get("type", "spelling"),
+                            original=e.get("original", ""),
+                            suggestion=e.get("suggestion", ""),
+                            explanation=e.get("explanation", ""),
+                            source_text=e.get("source_text", ""),
+                            severity=_severity_for(e.get("type", "spelling")),
+                        )
                     )
+                completed += 1
+                await analyses_col.update_one(
+                    {"id": analysis_id},
+                    {
+                        "$set": {
+                            "analyzed_frames": completed,
+                            "progress": 30 + int(50 * completed / max(len(frames), 1)),
+                            "issues": [i.model_dump() for i in all_issues],
+                            "message": f"Analyzed {completed}/{len(frames)} frames",
+                        }
+                    },
                 )
-            done = idx + 1
-            await analyses_col.update_one(
-                {"id": analysis_id},
-                {
-                    "$set": {
-                        "analyzed_frames": done,
-                        "progress": 30 + int(50 * done / max(len(frames), 1)),
-                        "issues": [i.model_dump() for i in all_issues],
-                        "message": f"Analyzed frame {done}/{len(frames)} ({int(ts)}s)",
-                    }
-                },
-            )
+
+        await _run_with_progress()
 
         # transcript pass (no timestamp)
         analysis = await _load(analysis_id)
@@ -372,6 +388,42 @@ async def get_analysis(analysis_id: str):
     d = a.model_dump()
     d.pop("password", None)
     return d
+
+
+@api.post("/analyses/{analysis_id}/issues/{issue_id}/post")
+async def post_single_issue(analysis_id: str, issue_id: str):
+    """Post one specific issue to Frame.io as a guest comment."""
+    a = await _load(analysis_id)
+    if not a:
+        raise HTTPException(404, "Not found")
+    if not a.frameio_url or not frameio_service.is_share_link(a.frameio_url):
+        raise HTTPException(
+            400, "Only Frame.io share links support guest comment posting."
+        )
+    idx = next(
+        (i for i, x in enumerate(a.issues) if x.id == issue_id), None
+    )
+    if idx is None:
+        raise HTTPException(404, "Issue not found")
+    issue = a.issues[idx]
+    if issue.posted_to_frameio:
+        return {"posted": False, "already": True}
+
+    result = await frameio_service.submit_guest_comments(
+        a.frameio_url,
+        a.password,
+        [{"timestamp_sec": issue.timestamp_sec, "text": _format_comment(issue)}],
+    )
+    flags = result.get("posted_flags") or [False]
+    if flags[0]:
+        a.issues[idx].posted_to_frameio = True
+        a.posted_count = sum(1 for i in a.issues if i.posted_to_frameio)
+        await _save(a)
+        return {"posted": True}
+    return {
+        "posted": False,
+        "error": result.get("error") or "Frame.io rejected the comment.",
+    }
 
 
 @api.post("/analyses/{analysis_id}/post")
