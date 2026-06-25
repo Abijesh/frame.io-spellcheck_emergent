@@ -26,7 +26,7 @@ export default function Landing() {
   const [url, setUrl] = useState("");
   const [transcript, setTranscript] = useState("");
   const [password, setPassword] = useState("");
-  const [autoPost, setAutoPost] = useState(true);
+  const [autoPost, setAutoPost] = useState(false);
   const [videoFile, setVideoFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [cfg, setCfg] = useState({
