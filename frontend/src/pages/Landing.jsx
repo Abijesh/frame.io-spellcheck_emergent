@@ -28,7 +28,11 @@ export default function Landing() {
   const [autoPost, setAutoPost] = useState(true);
   const [videoFile, setVideoFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
-  const [cfg, setCfg] = useState({ frameio_configured: false, llm_configured: false });
+  const [cfg, setCfg] = useState({
+    frameio_configured: false,
+    llm_configured: false,
+    adobe_connected: false,
+  });
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -121,17 +125,31 @@ export default function Landing() {
                   </h2>
                   <span
                     className={`font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border ${
-                      cfg.frameio_configured && cfg.llm_configured
+                      cfg.adobe_connected
                         ? "border-emerald-700 text-emerald-500"
                         : "border-amber-700 text-amber-500"
                     }`}
                     data-testid="config-badge"
                   >
-                    {cfg.frameio_configured && cfg.llm_configured
-                      ? "Connected"
-                      : "Check config"}
+                    {cfg.adobe_connected ? "Adobe connected" : "Sign in needed"}
                   </span>
                 </div>
+
+                {!cfg.adobe_connected && (
+                  <div
+                    data-testid="connect-hint"
+                    className="border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-200/90 leading-relaxed"
+                  >
+                    <strong className="text-amber-400">
+                      Sign in with Adobe first.
+                    </strong>{" "}
+                    Frame.io requires Adobe authentication to auto-post
+                    comments on V4 shares. The analysis (OCR + grammar) still
+                    works without it, but comments will not be posted. Click{" "}
+                    <span className="font-mono-tech">Connect Frame.io</span> in
+                    the top-right.
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <Label
