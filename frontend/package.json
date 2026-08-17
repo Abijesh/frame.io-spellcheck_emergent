@@ -83,6 +83,9 @@
     "@emergentbase/visual-edits": "https://assets.emergent.sh/npm/emergentbase-visual-edits-1.0.12.tgz",
     "@eslint/js": "9.23.0",
     "@types/lodash": "4.17.24",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
     "autoprefixer": "10.4.20",
     "dotenv": "16.4.5",
     "eslint": "9.23.0",
@@ -92,7 +95,8 @@
     "eslint-plugin-react-hooks": "5.2.0",
     "globals": "15.15.0",
     "postcss": "8.5.10",
-    "tailwindcss": "3.4.17"
+    "tailwindcss": "3.4.17",
+    "typescript": "^5"
   },
   "resolutions": {
     "react-router": "7.15.0",

@@ -17,29 +17,30 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { getAnalysis, postComments, postSingleIssue, API } from "@/lib/api";
+import type { Analysis as AnalysisData, AnalysisStatus, Issue, IssueType, Severity } from "@/types";
 
-const formatTime = (sec) => {
+const formatTime = (sec: number | null | undefined): string => {
   if (sec === undefined || sec === null || sec < 0) return "Script";
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 };
 
-const SEVERITY_COLOR = {
+const SEVERITY_COLOR: Record<Severity, string> = {
   high: "border-brand-700 text-brand-500",
   medium: "border-amber-700 text-amber-500",
   low: "border-zinc-700 text-zinc-400",
 };
 
-const TYPE_COLOR = {
+const TYPE_COLOR: Record<IssueType, string> = {
   spelling: "bg-brand-500/10 text-brand-500 border-brand-700",
   grammar: "bg-amber-600/10 text-amber-500 border-amber-700",
   punctuation: "bg-zinc-700/30 text-zinc-300 border-zinc-700",
   capitalization: "bg-emerald-600/10 text-emerald-500 border-emerald-700",
 };
 
-const StatusBadge = ({ status }) => {
-  const map = {
+const StatusBadge = ({ status }: { status: AnalysisStatus }) => {
+  const map: Record<AnalysisStatus, { label: string; color: string }> = {
     queued: { label: "Queued", color: "border-zinc-700 text-zinc-400" },
     downloading: { label: "Downloading", color: "border-blue-700 text-blue-400" },
     extracting: { label: "Extracting", color: "border-blue-700 text-blue-400" },
@@ -60,11 +61,12 @@ const StatusBadge = ({ status }) => {
 };
 
 export default function Analysis() {
-  const { id } = useParams();
-  const [analysis, setAnalysis] = useState(null);
+  const { id } = useParams<{ id: string }>();
+  const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
   const [posting, setPosting] = useState(false);
 
   const load = useCallback(async () => {
+    if (!id) return null;
     try {
       const a = await getAnalysis(id);
       setAnalysis(a);
@@ -77,7 +79,7 @@ export default function Analysis() {
 
   useEffect(() => {
     let mounted = true;
-    let timer;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       const a = await load();
       if (!mounted) return;
@@ -93,12 +95,13 @@ export default function Analysis() {
   }, [load]);
 
   const onPost = async () => {
+    if (!id) return;
     setPosting(true);
     try {
       const res = await postComments(id);
       toast.success(`Posted ${res.posted} new comment(s) to Frame.io`);
       await load();
-    } catch (e) {
+    } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to post comments");
     } finally {
       setPosting(false);
@@ -280,12 +283,12 @@ export default function Analysis() {
                 <IssueRow
                   key={issue.id || idx}
                   issue={issue}
-                  analysisId={id}
-                  canPost={
+                  analysisId={id!}
+                  canPost={Boolean(
                     analysis.status === "done" &&
-                    analysis.frameio_url &&
-                    analysis.frameio_url.match(/(f\.io\/|next\.frame\.io\/share\/)/)
-                  }
+                      analysis.frameio_url &&
+                      analysis.frameio_url.match(/(f\.io\/|next\.frame\.io\/share\/)/)
+                  )}
                   onPosted={() => load()}
                 />
               ))}
@@ -296,7 +299,15 @@ export default function Analysis() {
   );
 }
 
-const Stat = ({ label, value, accent }) => (
+const Stat = ({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string | number;
+  accent?: boolean;
+}) => (
   <div className="bg-zinc-950 p-5">
     <div className="font-mono-tech text-[10px] uppercase tracking-widest text-zinc-600 mb-2">
       {label}
@@ -311,8 +322,20 @@ const Stat = ({ label, value, accent }) => (
   </div>
 );
 
-const IssueRow = ({ issue, analysisId, canPost, onPosted }) => {
+const IssueRow = ({
+  issue,
+  analysisId,
+  canPost,
+  onPosted,
+}: {
+  issue: Issue;
+  analysisId: string;
+  canPost: boolean;
+  onPosted: () => void;
+}) => {
   const [posting, setPosting] = useState(false);
+  const hasRange =
+    issue.timestamp_sec >= 0 && issue.end_sec != null && issue.end_sec > issue.timestamp_sec;
 
   const handlePost = async () => {
     setPosting(true);
@@ -326,7 +349,7 @@ const IssueRow = ({ issue, analysisId, canPost, onPosted }) => {
       } else {
         toast.error(res.error || "Failed to post.");
       }
-    } catch (e) {
+    } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to post.");
     } finally {
       setPosting(false);
@@ -338,15 +361,26 @@ const IssueRow = ({ issue, analysisId, canPost, onPosted }) => {
       data-testid="issue-row"
       className="p-6 hover:bg-zinc-900/30 transition-colors duration-200 flex gap-6"
     >
-      <div className="shrink-0 w-20">
+      <div className="shrink-0 w-24">
         <div className="font-mono-tech text-sm text-brand-500 flex items-center gap-1">
-          <Clock className="w-3 h-3" />
+          <Clock className="w-3 h-3 shrink-0" />
           {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
+          {hasRange && <span className="text-zinc-600">–{formatTime(issue.end_sec)}</span>}
         </div>
         <div className="font-mono-tech text-[10px] text-zinc-600 mt-1">
           {issue.timestamp_sec >= 0 ? `${Math.round(issue.timestamp_sec)}s` : "Transcript"}
         </div>
       </div>
+
+      {issue.thumbnail_b64 && (
+        <div className="shrink-0">
+          <img
+            src={`data:image/jpeg;base64,${issue.thumbnail_b64}`}
+            alt={`On-screen text: ${issue.original}`}
+            className="w-36 h-16 object-contain border border-zinc-800 bg-zinc-900"
+          />
+        </div>
+      )}
 
       <div className="flex-1 space-y-2 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
