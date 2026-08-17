@@ -198,15 +198,19 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             message=f"Scanning {len(frames)} frames for on-screen text...",
             progress=25,
         )
+        # Sequential: a single GPU-backed EasyOCR reader, one call at a time.
+        # (Concurrent threads gave no speedup on CPU and add real risk on a
+        # single shared CUDA context, so not worth it now that GPU alone
+        # makes each call fast.)
         frame_results: List[Tuple[float, List[dict]]] = []
         for i, (ts, fpath) in enumerate(frames):
             hits = await asyncio.to_thread(ocr_service.ocr_frame, fpath)
             frame_results.append((ts, hits))
-            if i % 20 == 0:
+            if i % 5 == 0 or i == len(frames) - 1:
                 await _set_status(
                     analysis_id,
-                    progress=25 + int(20 * i / max(len(frames), 1)),
-                    message=f"Scanning frame {i}/{len(frames)} for text...",
+                    progress=25 + int(20 * (i + 1) / max(len(frames), 1)),
+                    message=f"Scanning frame {i + 1}/{len(frames)} for text...",
                 )
         instances = ocr_service.merge_instances(frame_results)
 
