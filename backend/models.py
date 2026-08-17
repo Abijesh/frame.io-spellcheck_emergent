@@ -17,12 +17,14 @@ class Issue(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp_sec: float = 0.0
+    end_sec: Optional[float] = None  # last frame this on-screen text was seen at
     type: str = "spelling"  # spelling | grammar | punctuation | capitalization
     original: str = ""
     suggestion: str = ""
     explanation: str = ""
     source_text: str = ""
     severity: str = "medium"  # low | medium | high
+    thumbnail_b64: Optional[str] = None  # JPEG crop of the flagged text, base64
     posted_to_frameio: bool = False
     frameio_comment_id: Optional[str] = None
 

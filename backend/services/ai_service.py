@@ -1,23 +1,18 @@
-"""Gemini 3 Flash powered OCR + grammar/spelling checker."""
+"""Gemini 3 Flash powered OCR + grammar/spelling checker (direct Google API)."""
 from __future__ import annotations
 
 import json
 import logging
 import os
 import re
-import uuid
 from typing import List, Optional
 
-from emergentintegrations.llm.chat import (
-    FileContentWithMimeType,
-    LlmChat,
-    UserMessage,
-)
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3-flash-preview"
-GEMINI_PROVIDER = "gemini"
 
 FRAME_SYSTEM = (
     "You are a meticulous proofreader for animation/video QA. "
@@ -40,9 +35,17 @@ TRANSCRIPT_SYSTEM = (
     "\"context\": str}]}"
 )
 
+_client: Optional[genai.Client] = None
 
-def _key() -> str:
-    return os.environ.get("EMERGENT_LLM_KEY", "")
+
+def _get_client() -> Optional[genai.Client]:
+    global _client
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        return None
+    if _client is None:
+        _client = genai.Client(api_key=key)
+    return _client
 
 
 def _strip_json(raw: str) -> str:
@@ -51,36 +54,37 @@ def _strip_json(raw: str) -> str:
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
         raw = re.sub(r"\n```$", "", raw)
-    # find the first { ... matching }
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     return m.group(0) if m else raw
 
 
 async def analyze_frame(image_path: str) -> List[dict]:
     """Return a list of error dicts for this frame. Empty list if no issues."""
-    if not _key():
-        logger.error("EMERGENT_LLM_KEY missing")
+    client = _get_client()
+    if not client:
+        logger.error("GEMINI_API_KEY missing")
         return []
-    chat = LlmChat(
-        api_key=_key(),
-        session_id=f"frame-{uuid.uuid4()}",
-        system_message=FRAME_SYSTEM,
-    ).with_model(GEMINI_PROVIDER, GEMINI_MODEL)
 
-    file_content = FileContentWithMimeType(
-        file_path=image_path, mime_type="image/jpeg"
-    )
-    msg = UserMessage(
-        text="Analyze this frame and return the JSON described in the system prompt.",
-        file_contents=[file_content],
-    )
+    with open(image_path, "rb") as f:
+        image_bytes = f.read()
+
     try:
-        response = await chat.send_message(msg)
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                "Analyze this frame and return the JSON described in the system prompt.",
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=FRAME_SYSTEM,
+                response_mime_type="application/json",
+            ),
+        )
     except Exception as exc:
         logger.warning("Gemini frame call failed: %s", exc)
         return []
 
-    raw = response if isinstance(response, str) else str(response)
+    raw = response.text or ""
     try:
         data = json.loads(_strip_json(raw))
     except Exception:
@@ -106,23 +110,24 @@ async def analyze_frame(image_path: str) -> List[dict]:
 
 
 async def analyze_transcript(transcript: str) -> List[dict]:
-    if not _key() or not transcript.strip():
+    client = _get_client()
+    if not client or not transcript.strip():
         return []
-    chat = LlmChat(
-        api_key=_key(),
-        session_id=f"transcript-{uuid.uuid4()}",
-        system_message=TRANSCRIPT_SYSTEM,
-    ).with_model(GEMINI_PROVIDER, GEMINI_MODEL)
 
     try:
-        response = await chat.send_message(
-            UserMessage(text=f"Transcript:\n\n{transcript}")
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[f"Transcript:\n\n{transcript}"],
+            config=types.GenerateContentConfig(
+                system_instruction=TRANSCRIPT_SYSTEM,
+                response_mime_type="application/json",
+            ),
         )
     except Exception as exc:
         logger.warning("Gemini transcript call failed: %s", exc)
         return []
 
-    raw = response if isinstance(response, str) else str(response)
+    raw = response.text or ""
     try:
         data = json.loads(_strip_json(raw))
     except Exception:

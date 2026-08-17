@@ -4,8 +4,11 @@ No Adobe OAuth. Pipeline per analysis:
   1. If a Frame.io share URL is given, open it in headless Chromium
      (fills password if provided) and grab the signed video CDN URL.
      If a video was uploaded, use that directly and skip step 5.
-  2. ffmpeg extracts one frame every FRAME_SAMPLE_INTERVAL seconds.
-  3. Gemini 3 Flash analyses each frame for OCR + spelling/grammar.
+  2. ffmpeg densely samples frames every FRAME_SAMPLE_INTERVAL seconds; a
+     local OCR pass (ocr_service) finds which frames have text and merges
+     consecutive matching frames into distinct on-screen text instances.
+  3. Gemini 3 Flash reads + spellchecks the clearest frame of each text
+     instance once (not once per sample), and a thumbnail is cropped from it.
   4. Optional transcript-level pass.
   5. Headless Chromium opens the share again, posts each issue as a guest
      comment under the name 'Spellchecker' at the right timestamp.
@@ -13,13 +16,14 @@ No Adobe OAuth. Pipeline per analysis:
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -35,7 +39,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
 from models import Analysis, Issue
-from services import ai_service, frameio_service, video_service
+from services import ai_service, frameio_service, ocr_service, video_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -51,7 +55,7 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 analyses_col = db["analyses"]
 
-FRAME_INTERVAL = float(os.environ.get("FRAME_SAMPLE_INTERVAL", "2"))
+FRAME_INTERVAL = float(os.environ.get("FRAME_SAMPLE_INTERVAL", "0.5"))
 
 app = FastAPI(title="Frame.io QA")
 api = APIRouter(prefix="/api")
@@ -177,47 +181,75 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             duration_sec=duration,
             video_fps=fps,
             message="Extracting frames...",
-            progress=25,
+            progress=20,
         )
 
         frames_dir = os.path.join(workdir, "frames")
         frames = await video_service.extract_frames(
             video_path, frames_dir, FRAME_INTERVAL
         )
+
+        # Cheap local OCR pass: figure out which frames have text at all, and
+        # merge consecutive matching frames into one instance per distinct
+        # piece of on-screen text so Gemini only sees it once.
         await _set_status(
             analysis_id,
             total_frames=len(frames),
+            message=f"Scanning {len(frames)} frames for on-screen text...",
+            progress=25,
+        )
+        frame_results: List[Tuple[float, List[dict]]] = []
+        for i, (ts, fpath) in enumerate(frames):
+            hits = await asyncio.to_thread(ocr_service.ocr_frame, fpath)
+            frame_results.append((ts, hits))
+            if i % 20 == 0:
+                await _set_status(
+                    analysis_id,
+                    progress=25 + int(20 * i / max(len(frames), 1)),
+                    message=f"Scanning frame {i}/{len(frames)} for text...",
+                )
+        instances = ocr_service.merge_instances(frame_results)
+
+        await _set_status(
+            analysis_id,
             status="analyzing",
-            message=f"Analyzing {len(frames)} frames with Gemini 3 Flash...",
-            progress=30,
+            total_frames=len(instances),
+            message=f"Found {len(instances)} on-screen text instance(s), "
+            f"checking with Gemini 3 Flash...",
+            progress=45,
         )
 
         all_issues: List[Issue] = []
         completed = 0
         sem = asyncio.Semaphore(3)  # cap concurrent Gemini calls
 
-        async def _analyze_one(ts: float, fpath: str):
+        async def _analyze_one(inst: dict):
+            _, fpath = frames[inst["frame_index"]]
             async with sem:
                 errs = await ai_service.analyze_frame(fpath)
-            return ts, errs
+            thumb = await asyncio.to_thread(
+                ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
+            )
+            return inst, errs, thumb
 
         async def _run_with_progress():
             nonlocal completed
-            tasks = [
-                asyncio.create_task(_analyze_one(ts, fp)) for ts, fp in frames
-            ]
+            tasks = [asyncio.create_task(_analyze_one(inst)) for inst in instances]
             for fut in asyncio.as_completed(tasks):
-                ts, errs = await fut
+                inst, errs, thumb = await fut
+                thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
                 for e in errs:
                     all_issues.append(
                         Issue(
-                            timestamp_sec=float(ts),
+                            timestamp_sec=float(inst["start"]),
+                            end_sec=float(inst["end"]),
                             type=e.get("type", "spelling"),
                             original=e.get("original", ""),
                             suggestion=e.get("suggestion", ""),
                             explanation=e.get("explanation", ""),
                             source_text=e.get("source_text", ""),
                             severity=_severity_for(e.get("type", "spelling")),
+                            thumbnail_b64=thumb_b64,
                         )
                     )
                 completed += 1
@@ -226,9 +258,9 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     {
                         "$set": {
                             "analyzed_frames": completed,
-                            "progress": 30 + int(50 * completed / max(len(frames), 1)),
+                            "progress": 45 + int(35 * completed / max(len(instances), 1)),
                             "issues": [i.model_dump() for i in all_issues],
-                            "message": f"Analyzed {completed}/{len(frames)} frames",
+                            "message": f"Checked {completed}/{len(instances)} text instances",
                         }
                     },
                 )
@@ -326,7 +358,7 @@ async def root():
 @api.get("/config")
 async def config():
     return {
-        "llm_configured": bool(os.environ.get("EMERGENT_LLM_KEY")),
+        "llm_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "frame_interval": FRAME_INTERVAL,
         "guest_name": frameio_service.GUEST_NAME,
     }
@@ -478,6 +510,7 @@ async def export_csv(analysis_id: str):
     w.writerow([
         "Timestamp (mm:ss)",
         "Seconds",
+        "Ends (mm:ss)",
         "Type",
         "Severity",
         "Original",
@@ -493,9 +526,15 @@ async def export_csv(analysis_id: str):
             if ts < 0
             else f"{int(ts // 60):02d}:{int(ts % 60):02d}"
         )
+        end_mm_ss = (
+            ""
+            if ts < 0 or i.end_sec is None
+            else f"{int(i.end_sec // 60):02d}:{int(i.end_sec % 60):02d}"
+        )
         w.writerow([
             mm_ss,
             "" if ts < 0 else f"{ts:.2f}",
+            end_mm_ss,
             i.type,
             i.severity,
             i.original,

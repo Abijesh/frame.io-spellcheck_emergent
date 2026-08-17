@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "Bash(pip3 show *)"
+      "Bash(pip3 show *)",
+      "Bash(python3 backend/tests/test_ocr_merge.py)"
     ]
   }
 }
