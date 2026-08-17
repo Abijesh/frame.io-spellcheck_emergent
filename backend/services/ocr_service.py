@@ -12,6 +12,7 @@ from __future__ import annotations
 import difflib
 import io
 import logging
+import threading
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -19,14 +20,20 @@ logger = logging.getLogger(__name__)
 SIMILARITY_THRESHOLD = 0.6  # consecutive frames counted as "same text"
 
 _reader = None
+_reader_lock = threading.Lock()
 
 
 def _get_reader():
     global _reader
+    # Guards against two concurrent first-callers each constructing their own
+    # Reader (each load is expensive). Cheap insurance even though the
+    # current pipeline calls ocr_frame sequentially.
     if _reader is None:
-        import easyocr
+        with _reader_lock:
+            if _reader is None:
+                import easyocr
 
-        _reader = easyocr.Reader(["en"], gpu=False)
+                _reader = easyocr.Reader(["en"], gpu=True)
     return _reader
 
 
