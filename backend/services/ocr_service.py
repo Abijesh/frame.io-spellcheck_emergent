@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.6  # consecutive frames counted as "same text"
 
+# WCAG 2.x contrast minimums: 4.5:1 for normal text, 3:1 for "large" text
+# (>=~24px / bold >=~19px, using box height as a proxy for point size here).
+CONTRAST_AA_NORMAL = 4.5
+CONTRAST_AA_LARGE = 3.0
+LARGE_TEXT_PX = 24
+
 _reader = None
 _reader_lock = threading.Lock()
 
@@ -123,6 +129,62 @@ def merge_instances(
         del inst["frames"]
 
     return instances
+
+
+def _relative_luminance(rgb):
+    """WCAG relative luminance for an array of sRGB pixels, shape (..., 3), 0-255."""
+    c = rgb / 255.0
+    c = (c <= 0.03928) * (c / 12.92) + (c > 0.03928) * (((c + 0.055) / 1.055) ** 2.4)
+    return c[..., 0] * 0.2126 + c[..., 1] * 0.7152 + c[..., 2] * 0.0722
+
+
+def check_contrast(image_path: str, ocr_results: List[dict]) -> List[dict]:
+    """WCAG-style contrast check for each detected text box on one frame.
+    Returns the boxes that fall below the applicable AA threshold:
+    [{"text", "bbox", "ratio", "threshold"}].
+
+    Ponytail: approximates foreground/background color via the 5th/95th
+    luminance percentile within each box rather than a real text-ink mask --
+    reasonable when text sits on a fairly uniform patch, prone to false
+    positives on outlined/drop-shadowed captions (deliberately legible
+    despite "bad" raw contrast) or a highly textured background. Also checks
+    only the instance's single representative frame, not its full on-screen
+    duration, so a brief bad-contrast moment within a longer instance can be
+    missed. Upgrade path: a real glyph mask (e.g. from the OCR detector's own
+    confidence map) and multi-frame sampling across the instance's span.
+    """
+    if not ocr_results:
+        return []
+    import numpy as np
+    from PIL import Image
+
+    out: List[dict] = []
+    with Image.open(image_path) as img:
+        arr = np.asarray(img.convert("RGB"))
+        h, w = arr.shape[:2]
+        for r in ocr_results:
+            x0, y0, x1, y1 = r["bbox"]
+            x0, y0 = max(0, int(x0)), max(0, int(y0))
+            x1, y1 = min(w, int(x1)), min(h, int(y1))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            box = arr[y0:y1, x0:x1].astype(np.float64)
+            lum = _relative_luminance(box)
+            l_dark, l_light = np.percentile(lum, [5, 95])
+            ratio = (l_light + 0.05) / (l_dark + 0.05)
+            threshold = (
+                CONTRAST_AA_LARGE if (y1 - y0) >= LARGE_TEXT_PX else CONTRAST_AA_NORMAL
+            )
+            if ratio < threshold:
+                out.append(
+                    {
+                        "text": r["text"],
+                        "bbox": r["bbox"],
+                        "ratio": round(float(ratio), 2),
+                        "threshold": threshold,
+                    }
+                )
+    return out
 
 
 def crop_thumbnail(
