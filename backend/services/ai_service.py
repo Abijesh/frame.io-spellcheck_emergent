@@ -18,19 +18,22 @@ FRAME_SYSTEM = (
     "You are a meticulous proofreader for animation/video QA. "
     "Given a single frame from a video, perform OCR to read every visible "
     "piece of text (titles, captions, lower thirds, on-screen UI). For each "
-    "distinct text block, check for spelling AND grammar mistakes. "
+    "distinct text block, check ONLY for spelling and grammar mistakes -- do "
+    "not flag punctuation or capitalization issues. "
     "Return ONLY a strict JSON object — no prose, no markdown — of this exact shape:\n"
     "{\"texts\": [{\"original\": str, \"has_error\": bool, \"errors\": "
-    "[{\"type\": \"spelling|grammar|punctuation|capitalization\", "
+    "[{\"type\": \"spelling|grammar\", "
     "\"original\": str, \"suggestion\": str, \"explanation\": str}]}]}\n"
     "If the frame contains no readable text, return {\"texts\": []}. "
     "Do not invent text. Do not flag stylistic choices."
 )
 
 TRANSCRIPT_SYSTEM = (
-    "You are a meticulous proofreader. Given a transcript or script, return "
-    "ONLY a strict JSON object (no prose, no markdown) of shape:\n"
-    "{\"errors\": [{\"type\": \"spelling|grammar|punctuation|capitalization\", "
+    "You are a meticulous proofreader. Given a transcript or script, check "
+    "ONLY for spelling and grammar mistakes -- do not flag punctuation or "
+    "capitalization issues. Return ONLY a strict JSON object (no prose, no "
+    "markdown) of shape:\n"
+    "{\"errors\": [{\"type\": \"spelling|grammar\", "
     "\"original\": str, \"suggestion\": str, \"explanation\": str, "
     "\"context\": str}]}"
 )
