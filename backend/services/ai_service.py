@@ -38,6 +38,37 @@ TRANSCRIPT_SYSTEM = (
     "\"context\": str}]}"
 )
 
+def parse_allowlist(raw: Optional[str]) -> List[str]:
+    """Comma/newline-separated terms -> a deduped list, order preserved."""
+    if not raw:
+        return []
+    parts = re.split(r"[,\n]", raw)
+    seen = set()
+    terms = []
+    for p in parts:
+        term = p.strip()
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms
+
+
+def _with_allowlist(system: str, allowlist: Optional[List[str]]) -> str:
+    """Appends a "don't flag these" clause to a system prompt. Belt-and-
+    suspenders with the exact-match post-filter in server.py -- this is what
+    stops Gemini from *suggesting* a "fix" for an intentional name/term in
+    the first place, the filter is the backstop if it ignores this anyway."""
+    if not allowlist:
+        return system
+    terms = ", ".join(allowlist)
+    return (
+        f"{system}\n\nThe following terms are intentional -- character or "
+        f"brand names, slang, project-specific jargon -- and must NOT be "
+        f"flagged as spelling errors even if they look unusual or "
+        f"misspelled: {terms}."
+    )
+
+
 _client: Optional[genai.Client] = None
 
 
@@ -61,7 +92,9 @@ def _strip_json(raw: str) -> str:
     return m.group(0) if m else raw
 
 
-async def analyze_frame(image_path: str) -> List[dict]:
+async def analyze_frame(
+    image_path: str, allowlist: Optional[List[str]] = None
+) -> List[dict]:
     """Return a list of error dicts for this frame. Empty list if no issues."""
     client = _get_client()
     if not client:
@@ -79,7 +112,7 @@ async def analyze_frame(image_path: str) -> List[dict]:
                 types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
             ],
             config=types.GenerateContentConfig(
-                system_instruction=FRAME_SYSTEM,
+                system_instruction=_with_allowlist(FRAME_SYSTEM, allowlist),
                 response_mime_type="application/json",
             ),
         )
@@ -112,7 +145,9 @@ async def analyze_frame(image_path: str) -> List[dict]:
     return out
 
 
-async def analyze_transcript(transcript: str) -> List[dict]:
+async def analyze_transcript(
+    transcript: str, allowlist: Optional[List[str]] = None
+) -> List[dict]:
     client = _get_client()
     if not client or not transcript.strip():
         return []
@@ -122,7 +157,7 @@ async def analyze_transcript(transcript: str) -> List[dict]:
             model=GEMINI_MODEL,
             contents=[f"Transcript:\n\n{transcript}"],
             config=types.GenerateContentConfig(
-                system_instruction=TRANSCRIPT_SYSTEM,
+                system_instruction=_with_allowlist(TRANSCRIPT_SYSTEM, allowlist),
                 response_mime_type="application/json",
             ),
         )
