@@ -48,6 +48,15 @@ back on the Frame.io asset at the exact timestamps. (Animation studio QA tool.)
 - Product scope is spelling/grammar only — punctuation and capitalization are
   excluded both in the Gemini prompt and defensively filtered server-side
   (`SKIPPED_ISSUE_TYPES`).
+- Optional contrast check (opt-in, 2026-08-19): WCAG-ratio check reusing the
+  OCR bounding boxes already produced for the spelling pass — no new
+  detection step, no extra Gemini calls (`ocr_service.check_contrast`).
+  Approximates foreground/background color via the 5th/95th luminance
+  percentile within each box and checks only the instance's one
+  representative frame; known to false-positive on outlined/drop-shadowed
+  captions and can miss a brief bad-contrast moment within a longer
+  instance. Covers what was tracked as "colour contrast, text
+  visibility/legibility" in the backlog.
 
 ## Endpoints
 - `GET  /api/config`
@@ -56,7 +65,7 @@ back on the Frame.io asset at the exact timestamps. (Animation studio QA tool.)
 - `GET  /api/analyses/{id}`
 - `POST /api/analyses/{id}/post` — bulk-post unposted issues
 - `POST /api/analyses/{id}/issues/{issue_id}/post` — post one issue
-- `DELETE /api/analyses/{id}`
+- `DELETE /api/analyses/{id}` — soft delete (`deleted: true`), never erases
 - `GET  /api/frameio/oauth/authorize` — redirects to Adobe IMS login
 - `GET  /api/frameio/oauth/callback` — exchanges code, sets session cookie
 - `GET  /api/frameio/oauth/status` — `{"connected": bool}`
@@ -73,7 +82,7 @@ official path at all.
 - [x] Landing page with Frame.io URL input, optional video upload, transcript
 - [x] Analysis page with live progress polling, thumbnail + time-range per
       issue, manual post button (bulk and per-issue)
-- [x] History page
+- [x] History page (soft-deleted analyses hidden, not erased)
 - [x] Frame.io asset id parsing + asset fetch + video download
 - [x] Dense ffmpeg sampling (0.5s) + local OCR merge → one Gemini call per
       distinct on-screen text instance, not per sampled frame
@@ -83,6 +92,10 @@ official path at all.
 - [x] Frame.io OAuth (Adobe IMS) connect/disconnect, official V4 API posting
       for files the connected account can reach, guest-scrape fallback
       otherwise
+- [x] Opt-in WCAG contrast check per on-screen text instance
+- [x] Optional brand/name/slang allowlist (landing page field): injected
+      into the Gemini prompt and defensively post-filtered server-side
+      (`ai_service.parse_allowlist`), same pattern as `SKIPPED_ISSUE_TYPES`
 
 ## Backlog / P1
 - Inline video player on analysis page with seek-to-timestamp
@@ -90,13 +103,15 @@ official path at all.
 - Slack / email digest of new reviews
 - Multi-tenant + auth (currently single-user; one Frame.io session per
   browser cookie, no app-level accounts)
-- Brand/name/slang allowlist to cut false positives
 - Confidence scoring surfaced from Gemini's own judgment, not a hardcoded
   severity-by-type table
-- Future scope (explicitly deferred, not started): colour contrast, text
-  visibility/legibility checks
+- Permanent purge / restore UI for soft-deleted analyses (currently
+  Mongo-only, no frontend for it)
 
 ## Done
 - ~~Group near-duplicate issues across consecutive frames~~ — resolved
   structurally by the OCR-instance-merge rewrite (one issue-set per distinct
   text instance, not per sampled frame).
+- ~~Colour contrast / text visibility check~~ — shipped as opt-in WCAG
+  contrast check, see Integrations above.
+- ~~Brand/name/slang allowlist~~ — shipped as an optional landing-page field.
