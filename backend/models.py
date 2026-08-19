@@ -44,6 +44,7 @@ class Analysis(BaseModel):
     password: Optional[str] = None
     auto_post: bool = True
     check_contrast: bool = False
+    allowlist: Optional[str] = None  # raw comma/newline-separated terms
     password_required: bool = False
 
     status: str = "queued"  # queued | downloading | extracting | analyzing | posting | done | failed
