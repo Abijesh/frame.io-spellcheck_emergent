@@ -8,13 +8,14 @@ export const API = `${BACKEND_URL}/api`;
 // it has to be explicitly opted into on every request.
 export const api = axios.create({ baseURL: API, withCredentials: true });
 
-export const createAnalysis = async ({ frameioUrl, transcript, password, autoPost, checkContrast, videoFile }) => {
+export const createAnalysis = async ({ frameioUrl, transcript, password, autoPost, checkContrast, allowlist, videoFile }) => {
   const form = new FormData();
   if (frameioUrl) form.append("frameio_url", frameioUrl);
   if (transcript) form.append("transcript", transcript);
   if (password) form.append("password", password);
   form.append("auto_post", autoPost ? "true" : "false");
   form.append("check_contrast", checkContrast ? "true" : "false");
+  if (allowlist) form.append("allowlist", allowlist);
   if (videoFile) form.append("video", videoFile);
   const { data } = await api.post("/analyses", form, {
     headers: { "Content-Type": "multipart/form-data" },
