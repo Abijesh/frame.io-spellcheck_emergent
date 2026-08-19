@@ -170,6 +170,7 @@ def _severity_for(err_type: str) -> str:
         "grammar": "high",
         "punctuation": "low",
         "capitalization": "medium",
+        "contrast": "medium",
     }.get(err_type, "medium")
 
 
@@ -253,6 +254,7 @@ def _format_comment(issue: Issue) -> str:
         "grammar": "Grammar",
         "punctuation": "Punctuation",
         "capitalization": "Capitalization",
+        "contrast": "Contrast",
     }.get(issue.type, "Issue")
     parts = [f"[{label}]"]
     if issue.original:
@@ -415,13 +417,18 @@ async def _run_pipeline(
             thumb = await asyncio.to_thread(
                 ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
             )
-            return inst, errs, thumb
+            contrast_hits: List[dict] = []
+            if analysis.check_contrast:
+                contrast_hits = await asyncio.to_thread(
+                    ocr_service.check_contrast, fpath, inst["ocr_results"]
+                )
+            return inst, errs, thumb, contrast_hits
 
         async def _run_with_progress():
             nonlocal completed
             tasks = [asyncio.create_task(_analyze_one(inst)) for inst in instances]
             for fut in asyncio.as_completed(tasks):
-                inst, errs, thumb = await fut
+                inst, errs, thumb, contrast_hits = await fut
                 thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
                 for e in errs:
                     if e.get("type") in SKIPPED_ISSUE_TYPES:
@@ -436,6 +443,30 @@ async def _run_pipeline(
                             explanation=e.get("explanation", ""),
                             source_text=e.get("source_text", ""),
                             severity=_severity_for(e.get("type", "spelling")),
+                            thumbnail_b64=thumb_b64,
+                        )
+                    )
+                if contrast_hits:
+                    # Only the worst offender per instance -- one contrast
+                    # issue per on-screen text instance, same granularity as
+                    # the spelling/grammar checks above.
+                    worst = min(contrast_hits, key=lambda c: c["ratio"])
+                    all_issues.append(
+                        Issue(
+                            timestamp_sec=float(inst["start"]),
+                            end_sec=float(inst["end"]),
+                            type="contrast",
+                            original=worst["text"],
+                            source_text=worst["text"],
+                            explanation=(
+                                "This text blends into what's behind it, so it's "
+                                "hard to read at a glance. Try a bolder/lighter "
+                                "text color, an outline, or a drop shadow/"
+                                "background behind it. (Measured contrast "
+                                f"{worst['ratio']}:1 — accessibility guidelines "
+                                f"call for at least {worst['threshold']}:1.)"
+                            ),
+                            severity=_severity_for("contrast"),
                             thumbnail_b64=thumb_b64,
                         )
                     )
@@ -615,6 +646,7 @@ async def create_analysis(
     transcript: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
     auto_post: bool = Form(True),
+    check_contrast: bool = Form(False),
     video: Optional[UploadFile] = File(None),
     fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ):
@@ -629,6 +661,7 @@ async def create_analysis(
         transcript=transcript,
         password=password,
         auto_post=auto_post,
+        check_contrast=check_contrast,
         video_filename=video.filename if video else None,
     )
     await _save(analysis)
@@ -648,7 +681,11 @@ async def create_analysis(
 
 @api.get("/analyses")
 async def list_analyses():
-    cursor = analyses_col.find({}, {"_id": 0}).sort("created_at", -1).limit(50)
+    cursor = (
+        analyses_col.find({"deleted": {"$ne": True}}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(50)
+    )
     items = await cursor.to_list(length=50)
     for it in items:
         it["issue_count"] = len(it.get("issues") or [])
@@ -783,8 +820,13 @@ async def export_csv(analysis_id: str):
 
 @api.delete("/analyses/{analysis_id}")
 async def delete_analysis(analysis_id: str):
-    res = await analyses_col.delete_one({"id": analysis_id})
-    return {"deleted": res.deleted_count}
+    """Soft delete: hides the analysis from history without erasing it, so
+    it can still be recovered later (permanent purge is a separate, not yet
+    built, step)."""
+    res = await analyses_col.update_one(
+        {"id": analysis_id}, {"$set": {"deleted": True}}
+    )
+    return {"deleted": res.modified_count > 0}
 
 
 app.include_router(api)
