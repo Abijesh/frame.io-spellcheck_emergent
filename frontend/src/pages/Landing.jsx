@@ -1,7 +1,19 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock, CheckCircle2, Tags } from "lucide-react";
+import {
+  ArrowRight,
+  Link2,
+  Upload,
+  Sparkles,
+  FileText,
+  Zap,
+  Eye,
+  Lock,
+  CheckCircle2,
+  Tags,
+  Contrast,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,7 +34,9 @@ const Feature = ({ icon: Icon, title, desc, testid }) => (
     className="border border-zinc-800 bg-zinc-950 p-8 transition-transform duration-200 hover:-translate-y-1"
   >
     <Icon className="w-6 h-6 text-brand-500 mb-6" strokeWidth={1.5} />
-    <h3 className="font-display font-bold text-lg mb-2 tracking-tight">{title}</h3>
+    <h3 className="font-display font-bold text-lg mb-2 tracking-tight">
+      {title}
+    </h3>
     <p className="text-sm text-zinc-500 leading-relaxed">{desc}</p>
   </div>
 );
@@ -51,7 +65,9 @@ export default function Landing() {
   };
 
   useEffect(() => {
-    getConfig().then(setCfg).catch(() => {});
+    getConfig()
+      .then(setCfg)
+      .catch(() => {});
     refreshFrameioStatus();
   }, []);
 
@@ -131,16 +147,17 @@ export default function Landing() {
                 </span>
               </div>
               <h1 className="font-display font-black text-5xl sm:text-6xl lg:text-7xl tracking-tighter leading-[0.95] mb-8">
-                Spot every typo
+                Spot every error
                 <br />
                 before your client
                 <br />
                 <span className="text-brand-500">does.</span>
               </h1>
               <p className="text-zinc-400 text-lg max-w-xl leading-relaxed mb-10">
-                Drop in a Frame.io link. We read every on-screen frame, flag spelling
-                and grammar mistakes with timestamps, and post them straight back
-                as comments — so revisions stop ping-ponging.
+                Drop in a Frame.io link. We read every on-screen frame, flag
+                spelling, grammar mistakes and contrast issues with timestamps,
+                and post them straight back as comments — so revisions stop
+                ping-ponging.
               </p>
 
               <div className="flex flex-wrap gap-6 font-mono-tech text-xs text-zinc-500 uppercase">
@@ -148,10 +165,14 @@ export default function Landing() {
                   <Eye className="w-4 h-4 text-brand-500" /> Frame-by-frame OCR
                 </span>
                 <span className="flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-brand-500" /> Grammar + spelling
+                  <Sparkles className="w-4 h-4 text-brand-500" /> Grammar +
+                  spelling
                 </span>
                 <span className="flex items-center gap-2">
                   <Zap className="w-4 h-4 text-brand-500" /> Auto-posts comments
+                </span>
+                <span className="flex items-center gap-2">
+                  <Contrast className="w-4 h-4 text-brand-500" /> Contrast check
                 </span>
               </div>
             </div>
@@ -194,7 +215,10 @@ export default function Landing() {
                     </a>
                   )}
                 </div>
-                <p className="text-xs text-zinc-600 -mt-4" data-testid="posting-mode-hint">
+                <p
+                  className="text-xs text-zinc-600 -mt-4"
+                  data-testid="posting-mode-hint"
+                >
                   {frameioConnected
                     ? "Comments post through your connected Frame.io account, with frame-accurate timestamps."
                     : `Not connected — comments post as guest "${cfg.guest_name || "Spellchecker"}" instead.`}
@@ -323,7 +347,8 @@ export default function Landing() {
                     </Label>
                     <p className="text-xs text-zinc-600">
                       Flags on-screen text below WCAG AA contrast against its
-                      background. May false-positive on outlined/shadowed captions.
+                      background. May false-positive on outlined/shadowed
+                      captions.
                     </p>
                   </div>
                   <Switch
@@ -340,7 +365,9 @@ export default function Landing() {
                   disabled={submitting}
                   className="w-full bg-brand-500 hover:bg-brand-400 text-zinc-950 border-0 h-12 font-mono-tech uppercase tracking-widest text-xs rounded-none"
                 >
-                  {submitting ? "Starting..." : (
+                  {submitting ? (
+                    "Starting..."
+                  ) : (
                     <>
                       Analyze video <ArrowRight className="ml-2 w-4 h-4" />
                     </>
@@ -376,19 +403,31 @@ export default function Landing() {
               testid="feature-ai"
               icon={Sparkles}
               title="02 · Spelling & grammar AI"
-              desc="Gemini 3 Flash reads each distinct piece of on-screen text once and checks it for spelling and grammar mistakes, with a suggested fix you can paste straight in."
+              desc="Gemini 3 Flash reads each distinct piece of on-screen text once and checks it for spelling and grammar mistakes, with a suggested fix you can paste straight in. Add an allowlist for character names or brand terms so they're never flagged."
+            />
+            <Feature
+              testid="feature-contrast"
+              icon={Contrast}
+              title="03 · Contrast check (beta)"
+              desc="Flags on-screen text that's too close in color to its background to read comfortably, measured against the WCAG AA standard. Opt-in, off by default."
             />
             <Feature
               testid="feature-timestamp"
               icon={Zap}
-              title="03 · Timestamps that match"
+              title="04 · Timestamps that match"
               desc="Every issue is tagged with the exact second it appears in the video, ready to drop into Frame.io's player."
             />
             <Feature
               testid="feature-autopost"
               icon={Link2}
-              title="04 · Auto-posts comments"
+              title="05 · Auto-posts comments"
               desc="Each issue becomes a comment on the Frame.io asset at the correct timestamp — your animators see it in their dashboard."
+            />
+            <Feature
+              testid="feature-oauth"
+              icon={Lock}
+              title="06 · Works with or without login"
+              desc="Connect your Frame.io account for official-API posting with frame-accurate timestamps, or skip it — comments still post as a guest reviewer on any public share link."
             />
           </div>
         </div>
