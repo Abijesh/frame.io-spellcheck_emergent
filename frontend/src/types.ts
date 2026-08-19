@@ -1,6 +1,6 @@
 // Mirrors backend/models.py. Keep in sync when the API shape changes.
 
-export type IssueType = "spelling" | "grammar" | "punctuation" | "capitalization";
+export type IssueType = "spelling" | "grammar" | "punctuation" | "capitalization" | "contrast";
 export type Severity = "low" | "medium" | "high";
 
 export interface Issue {
