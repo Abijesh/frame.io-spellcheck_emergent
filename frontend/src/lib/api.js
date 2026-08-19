@@ -3,7 +3,10 @@ import axios from "axios";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
 
-export const api = axios.create({ baseURL: API });
+// withCredentials: the Frame.io OAuth session lives in an httpOnly cookie set
+// by the backend (different port = different origin from the frontend), so
+// it has to be explicitly opted into on every request.
+export const api = axios.create({ baseURL: API, withCredentials: true });
 
 export const createAnalysis = async ({ frameioUrl, transcript, password, autoPost, videoFile }) => {
   const form = new FormData();
@@ -47,5 +50,18 @@ export const deleteAnalysis = async (id) => {
 
 export const getConfig = async () => {
   const { data } = await api.get("/config");
+  return data;
+};
+
+export const getFrameioStatus = async () => {
+  const { data } = await api.get("/frameio/oauth/status");
+  return data;
+};
+
+// Real browser navigation, not a fetch -- has to go through Adobe's login UI.
+export const connectFrameioUrl = `${API}/frameio/oauth/authorize`;
+
+export const disconnectFrameio = async () => {
+  const { data } = await api.post("/frameio/oauth/disconnect");
   return data;
 };
