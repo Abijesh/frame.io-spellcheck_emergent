@@ -37,6 +37,7 @@ const TYPE_COLOR: Record<IssueType, string> = {
   grammar: "bg-amber-600/10 text-amber-500 border-amber-700",
   punctuation: "bg-zinc-700/30 text-zinc-300 border-zinc-700",
   capitalization: "bg-emerald-600/10 text-emerald-500 border-emerald-700",
+  contrast: "bg-sky-600/10 text-sky-500 border-sky-700",
 };
 
 const StatusBadge = ({ status }: { status: AnalysisStatus }) => {
@@ -406,7 +407,11 @@ const IssueRow = ({
         </div>
 
         <div className="flex items-center gap-3 flex-wrap text-base">
-          <span className="line-through text-zinc-500 font-medium break-all">
+          <span
+            className={`font-medium break-all ${
+              issue.suggestion ? "line-through text-zinc-500" : "text-zinc-300"
+            }`}
+          >
             {issue.original || "—"}
           </span>
           {issue.suggestion && (
