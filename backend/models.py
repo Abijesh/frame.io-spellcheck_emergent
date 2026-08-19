@@ -27,6 +27,7 @@ class Issue(BaseModel):
     thumbnail_b64: Optional[str] = None  # JPEG crop of the flagged text, base64
     posted_to_frameio: bool = False
     frameio_comment_id: Optional[str] = None
+    posted_via: Optional[str] = None  # "official_api" | "guest"
 
 
 class Analysis(BaseModel):
@@ -63,3 +64,17 @@ class AnalyzeRequest(BaseModel):
     frameio_url: Optional[str] = None
     transcript: Optional[str] = None
     auto_post: bool = True
+
+
+class FrameioSession(BaseModel):
+    """A connected Frame.io account, keyed by an opaque id stored in the
+    user's session cookie -- the actual OAuth tokens never reach the browser."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    access_token: str
+    refresh_token: str
+    expires_at: str  # ISO timestamp
+    account_id: Optional[str] = None
+    created_at: str = Field(default_factory=_now_iso)
