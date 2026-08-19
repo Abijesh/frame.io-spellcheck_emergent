@@ -34,6 +34,7 @@ export default function Landing() {
   const [transcript, setTranscript] = useState("");
   const [password, setPassword] = useState("");
   const [autoPost, setAutoPost] = useState(false);
+  const [checkContrast, setCheckContrast] = useState(false);
   const [videoFile, setVideoFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [cfg, setCfg] = useState({
@@ -90,6 +91,7 @@ export default function Landing() {
         transcript: transcript || null,
         password: password || null,
         autoPost,
+        checkContrast,
         videoFile,
       });
       toast.success("Analysis started.");
@@ -290,6 +292,27 @@ export default function Landing() {
                   />
                 </div>
 
+                <div className="flex items-center justify-between border-t border-zinc-900 pt-4">
+                  <div className="space-y-0.5">
+                    <Label
+                      htmlFor="check-contrast"
+                      className="text-sm text-white cursor-pointer"
+                    >
+                      Check text contrast (beta)
+                    </Label>
+                    <p className="text-xs text-zinc-600">
+                      Flags on-screen text below WCAG AA contrast against its
+                      background. May false-positive on outlined/shadowed captions.
+                    </p>
+                  </div>
+                  <Switch
+                    id="check-contrast"
+                    data-testid="check-contrast-switch"
+                    checked={checkContrast}
+                    onCheckedChange={setCheckContrast}
+                  />
+                </div>
+
                 <Button
                   type="submit"
                   data-testid="analyze-submit-btn"
@@ -325,14 +348,14 @@ export default function Landing() {
             <Feature
               testid="feature-ocr"
               icon={Eye}
-              title="01 · Frame-by-frame OCR"
-              desc="ffmpeg samples one frame every 2 seconds. Each frame is passed to Gemini 3 Flash for OCR — including stylized animation titles."
+              title="01 · Dense OCR scan"
+              desc="A local OCR pass scans frames every 0.5 seconds and merges repeated on-screen text into one instance — so nothing brief gets missed and nothing gets flagged twice."
             />
             <Feature
               testid="feature-ai"
               icon={Sparkles}
               title="02 · Spelling & grammar AI"
-              desc="Detects misspellings, agreement errors, missing punctuation and bad capitalization. Suggests fixes you can paste straight in."
+              desc="Gemini 3 Flash reads each distinct piece of on-screen text once and checks it for spelling and grammar mistakes, with a suggested fix you can paste straight in."
             />
             <Feature
               testid="feature-timestamp"
