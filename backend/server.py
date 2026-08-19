@@ -1,17 +1,31 @@
-"""Frame.io QA backend (guest-mode commenting).
+"""Frame.io QA backend.
 
-No Adobe OAuth. Pipeline per analysis:
-  1. If a Frame.io share URL is given, open it in headless Chromium
-     (fills password if provided) and grab the signed video CDN URL.
-     If a video was uploaded, use that directly and skip step 5.
+Two ways to reach Frame.io, chosen per-analysis based on whether the caller
+has a connected Frame.io account (session cookie):
+
+  Connected  (OAuth, official V4 API): real download_url via the Files API,
+             comments posted via the real Comments API with frame-accurate
+             timestamps. Requires the file to be in a project this identity
+             is a member of -- the official API has no way to resolve an
+             arbitrary public share link outside that, so...
+  Anonymous  (Playwright, guest mode): headless Chromium opens the share,
+             scrapes the signed video URL, and posts comments by simulating
+             keyboard seeks + typing as a guest named 'Spellchecker'. This is
+             the only way to handle a share link from someone else's account.
+
+Both paths first do a lightweight page-load of the share link to resolve its
+file UUID (frameio_service.resolve_share_video) -- the official API has no
+share-lookup endpoint either, so this step is unavoidable either way.
+
+Processing pipeline (shared by both paths):
+  1. Resolve the share link (or use the uploaded video directly).
   2. ffmpeg densely samples frames every FRAME_SAMPLE_INTERVAL seconds; a
      local OCR pass (ocr_service) finds which frames have text and merges
      consecutive matching frames into distinct on-screen text instances.
   3. Gemini 3 Flash reads + spellchecks the clearest frame of each text
      instance once (not once per sample), and a thumbnail is cropped from it.
   4. Optional transcript-level pass.
-  5. Headless Chromium opens the share again, posts each issue as a guest
-     comment under the name 'Spellchecker' at the right timestamp.
+  5. Post each issue back to Frame.io via whichever path applies.
 """
 from __future__ import annotations
 
@@ -19,9 +33,10 @@ import asyncio
 import base64
 import logging
 import os
+import secrets
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -29,17 +44,21 @@ from dotenv import load_dotenv
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Cookie,
     FastAPI,
     File,
     Form,
     HTTPException,
+    Request,
+    Response,
     UploadFile,
 )
+from fastapi.responses import RedirectResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from starlette.middleware.cors import CORSMiddleware
 
-from models import Analysis, Issue
-from services import ai_service, frameio_service, ocr_service, video_service
+from models import Analysis, FrameioSession, Issue
+from services import ai_service, frameio_api, frameio_oauth, frameio_service, ocr_service, video_service
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -54,8 +73,16 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 analyses_col = db["analyses"]
+frameio_sessions_col = db["frameio_sessions"]
 
 FRAME_INTERVAL = float(os.environ.get("FRAME_SAMPLE_INTERVAL", "0.5"))
+# Product scope is spelling/grammar only for now. The prompt already asks
+# Gemini not to flag these, but that's not a guarantee -- drop them here too
+# so a model slip-up never reaches a user.
+SKIPPED_ISSUE_TYPES = {"punctuation", "capitalization"}
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+OAUTH_STATE_COOKIE = "fio_oauth_state"
+SESSION_COOKIE = "fio_session"
 
 app = FastAPI(title="Frame.io QA")
 api = APIRouter(prefix="/api")
@@ -83,6 +110,60 @@ async def _load(analysis_id: str) -> Optional[Analysis]:
     return Analysis(**doc) if doc else None
 
 
+async def _new_frameio_session(tokens: dict) -> str:
+    """Store OAuth tokens server-side; only the opaque session id goes to the
+    browser (as an httpOnly cookie), so the tokens themselves never leave
+    the backend."""
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=int(tokens.get("expires_in", 3600)))
+    ).isoformat()
+    session = FrameioSession(
+        access_token=tokens["access_token"],
+        refresh_token=tokens["refresh_token"],
+        expires_at=expires_at,
+    )
+    try:
+        account_ids = await frameio_api.list_account_ids(session.access_token)
+        session.account_id = account_ids[0] if account_ids else None
+    except frameio_api.FrameioApiError as exc:
+        logger.warning("Could not resolve Frame.io account_id at connect time: %s", exc)
+    await frameio_sessions_col.insert_one(session.model_dump())
+    return session.id
+
+
+async def _get_valid_frameio_token(session_id: Optional[str]) -> Optional[FrameioSession]:
+    """Returns a session with a live access_token (refreshing if needed), or
+    None if not connected / the session is gone."""
+    if not session_id:
+        return None
+    doc = await frameio_sessions_col.find_one({"id": session_id}, {"_id": 0})
+    if not doc:
+        return None
+    session = FrameioSession(**doc)
+    expires_at = datetime.fromisoformat(session.expires_at)
+    if expires_at > datetime.now(timezone.utc) + timedelta(minutes=2):
+        return session
+    try:
+        tokens = await frameio_oauth.refresh_access_token(session.refresh_token)
+    except Exception as exc:
+        logger.warning("Frame.io token refresh failed for session %s: %s", session_id, exc)
+        return None
+    session.access_token = tokens["access_token"]
+    session.refresh_token = tokens.get("refresh_token", session.refresh_token)
+    session.expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=int(tokens.get("expires_in", 3600)))
+    ).isoformat()
+    await frameio_sessions_col.update_one(
+        {"id": session_id},
+        {"$set": {
+            "access_token": session.access_token,
+            "refresh_token": session.refresh_token,
+            "expires_at": session.expires_at,
+        }},
+    )
+    return session
+
+
 def _severity_for(err_type: str) -> str:
     return {
         "spelling": "high",
@@ -90,6 +171,80 @@ def _severity_for(err_type: str) -> str:
         "punctuation": "low",
         "capitalization": "medium",
     }.get(err_type, "medium")
+
+
+async def _post_issues_to_frameio(
+    analysis: Analysis, issues: List[Issue], fio_session: Optional[FrameioSession]
+) -> dict:
+    """Posts `issues` (must be a subset of analysis.issues, same objects, so
+    mutations here are visible to the caller) to Frame.io: official API if
+    this identity can reach the file, guest Playwright flow otherwise.
+    Shared by the auto-post pipeline and both manual-post endpoints so the
+    routing logic only lives in one place. Returns {"posted": int, "error":
+    str|None}."""
+    if not issues:
+        return {"posted": 0, "error": None}
+
+    official_file_reachable = False
+    if fio_session and fio_session.account_id and analysis.frameio_asset_id:
+        try:
+            official_file_reachable = bool(
+                await frameio_api.get_file_download_url(
+                    fio_session.access_token, fio_session.account_id, analysis.frameio_asset_id
+                )
+            )
+        except frameio_api.FrameioApiError as exc:
+            logger.warning("Official file lookup failed, falling back to guest: %s", exc)
+
+    if official_file_reachable:
+        posted = 0
+        for issue in issues:
+            frame = frameio_api.sec_to_frame(issue.timestamp_sec, analysis.video_fps)
+            try:
+                resp = await frameio_api.create_comment(
+                    fio_session.access_token,
+                    fio_session.account_id,
+                    analysis.frameio_asset_id,
+                    _format_comment(issue),
+                    frame,
+                )
+                issue.posted_to_frameio = True
+                issue.posted_via = "official_api"
+                issue.frameio_comment_id = resp.get("id")
+                posted += 1
+            except frameio_api.FrameioApiError as exc:
+                logger.warning("Official comment post failed for issue %s: %s", issue.id, exc)
+        error = "Frame.io API rejected all comments." if posted == 0 else None
+        return {"posted": posted, "error": error}
+
+    if not analysis.frameio_url or not frameio_service.is_share_link(analysis.frameio_url):
+        return {
+            "posted": 0,
+            "error": "This file isn't reachable via your connected Frame.io "
+            "account, and it isn't a share link either, so there's no way "
+            "to post comments to it.",
+        }
+
+    payloads = [
+        {"timestamp_sec": i.timestamp_sec, "text": _format_comment(i)} for i in issues
+    ]
+    result = await frameio_service.submit_guest_comments(
+        analysis.frameio_url, analysis.password, payloads
+    )
+    flags = result.get("posted_flags") or []
+    posted = 0
+    for idx, issue in enumerate(issues):
+        if idx < len(flags) and flags[idx]:
+            issue.posted_to_frameio = True
+            issue.posted_via = "guest"
+            posted += 1
+    error = result.get("error")
+    if not error and result.get("failed", 0) > 0 and posted == 0:
+        error = (
+            "Frame.io rejected all comments. The share owner may have "
+            "disabled commenting on this link."
+        )
+    return {"posted": posted, "error": error}
 
 
 def _format_comment(issue: Issue) -> str:
@@ -110,12 +265,23 @@ def _format_comment(issue: Issue) -> str:
 
 
 # ---------------- background pipeline ----------------
-async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None) -> None:
+async def _run_pipeline(
+    analysis_id: str,
+    video_local_path: Optional[str] = None,
+    frameio_session_id: Optional[str] = None,
+) -> None:
     workdir = tempfile.mkdtemp(prefix=f"frameio_{analysis_id}_")
     try:
         analysis = await _load(analysis_id)
         if not analysis:
             return
+
+        fio_session = await _get_valid_frameio_token(frameio_session_id)
+        # Set only if the official API actually resolved this file (i.e. it's
+        # in a project the connected account belongs to) -- gates whether
+        # comment-posting attempts the official API at all, so we don't waste
+        # calls hitting 403s for a video that isn't ours before falling back.
+        official_file_reachable = False
 
         video_path = video_local_path
         if not video_path:
@@ -163,7 +329,22 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
             await _set_status(
                 analysis_id, message="Downloading video...", progress=15
             )
-            ok = await frameio_service.download_video(info["video_url"], video_path)
+
+            download_url = info["video_url"]
+            if fio_session and fio_session.account_id and info.get("file_id"):
+                try:
+                    official_url = await frameio_api.get_file_download_url(
+                        fio_session.access_token, fio_session.account_id, info["file_id"]
+                    )
+                    if official_url:
+                        download_url = official_url
+                        official_file_reachable = True
+                except frameio_api.FrameioApiError as exc:
+                    logger.warning(
+                        "Official file lookup failed, using scraped URL instead: %s", exc
+                    )
+
+            ok = await frameio_service.download_video(download_url, video_path)
             if not ok:
                 await _set_status(
                     analysis_id,
@@ -243,6 +424,8 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                 inst, errs, thumb = await fut
                 thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
                 for e in errs:
+                    if e.get("type") in SKIPPED_ISSUE_TYPES:
+                        continue
                     all_issues.append(
                         Issue(
                             timestamp_sec=float(inst["start"]),
@@ -278,6 +461,8 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                 analysis_id, message="Checking transcript...", progress=82
             )
             for e in await ai_service.analyze_transcript(analysis.transcript):
+                if e.get("type") in SKIPPED_ISSUE_TYPES:
+                    continue
                 all_issues.append(
                     Issue(
                         timestamp_sec=-1.0,
@@ -290,46 +475,34 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     )
                 )
 
-        # Guest comment posting
+        # Post comments: official API if this identity can reach the file
+        # (member of its project), guest Playwright flow otherwise -- see
+        # _post_issues_to_frameio for the routing logic itself.
         analysis = await _load(analysis_id)
         posted = 0
         post_err_msg: Optional[str] = None
+        postable: List[Issue] = []
         if (
             analysis
             and analysis.auto_post
-            and analysis.frameio_url
-            and frameio_service.is_share_link(analysis.frameio_url)
             and all_issues
+            and (
+                (fio_session and fio_session.account_id and analysis.frameio_asset_id)
+                or (analysis.frameio_url and frameio_service.is_share_link(analysis.frameio_url))
+            )
         ):
+            postable = [i for i in all_issues if i.timestamp_sec >= 0]
             await _set_status(
                 analysis_id,
                 status="posting",
                 progress=85,
-                message=f"Posting {len(all_issues)} comments as Spellchecker...",
+                message=f"Posting {len(postable)} comments to Frame.io...",
             )
-            payloads = [
-                {
-                    "timestamp_sec": i.timestamp_sec,
-                    "text": _format_comment(i),
-                }
-                for i in all_issues
-            ]
-            result = await frameio_service.submit_guest_comments(
-                analysis.frameio_url, analysis.password, payloads
-            )
-            flags = result.get("posted_flags") or []
-            for idx, issue in enumerate(all_issues):
-                if idx < len(flags) and flags[idx]:
-                    issue.posted_to_frameio = True
-            posted = result.get("posted", 0)
-            if result.get("error"):
-                post_err_msg = result["error"]
-            elif result.get("failed", 0) > 0 and posted == 0:
-                post_err_msg = (
-                    "Frame.io rejected all comments. The share owner may have "
-                    "disabled commenting on this link."
-                )
+            result = await _post_issues_to_frameio(analysis, postable, fio_session)
+            posted = result["posted"]
+            post_err_msg = result["error"]
 
+        posted_via_official = any(i.posted_via == "official_api" for i in postable)
         await analyses_col.update_one(
             {"id": analysis_id},
             {
@@ -340,7 +513,8 @@ async def _run_pipeline(analysis_id: str, video_local_path: Optional[str] = None
                     "posted_count": posted,
                     "post_error": post_err_msg,
                     "message": f"Done. {len(all_issues)} issues found, "
-                    f"{posted} posted as Spellchecker.",
+                    f"{posted} posted to Frame.io"
+                    + (" via API." if posted_via_official else " as Spellchecker."),
                 }
             },
         )
@@ -365,7 +539,73 @@ async def config():
         "llm_configured": bool(os.environ.get("GEMINI_API_KEY")),
         "frame_interval": FRAME_INTERVAL,
         "guest_name": frameio_service.GUEST_NAME,
+        "frameio_oauth_configured": frameio_oauth.is_configured(),
     }
+
+
+# ---------------- Frame.io OAuth ----------------
+@api.get("/frameio/oauth/authorize")
+async def frameio_oauth_authorize():
+    if not frameio_oauth.is_configured():
+        raise HTTPException(500, "Frame.io OAuth is not configured on this server.")
+    state = secrets.token_urlsafe(24)
+    resp = RedirectResponse(frameio_oauth.build_authorize_url(state))
+    resp.set_cookie(
+        OAUTH_STATE_COOKIE, state,
+        httponly=True, secure=True, samesite="lax", max_age=300,
+    )
+    return resp
+
+
+@api.get("/frameio/oauth/callback")
+async def frameio_oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    expected_state = request.cookies.get(OAUTH_STATE_COOKIE)
+    if error or not code or not state or state != expected_state:
+        return RedirectResponse(f"{FRONTEND_URL}/?frameio_connect=error")
+
+    try:
+        tokens = await frameio_oauth.exchange_code(code)
+        session_id = await _new_frameio_session(tokens)
+    except Exception as exc:
+        logger.exception("Frame.io OAuth token exchange failed: %s", exc)
+        return RedirectResponse(f"{FRONTEND_URL}/?frameio_connect=error")
+
+    resp = RedirectResponse(f"{FRONTEND_URL}/?frameio_connect=success")
+    resp.delete_cookie(OAUTH_STATE_COOKIE)
+    # None (not Lax): this cookie has to survive fetch/XHR calls the frontend
+    # makes from its own origin (localhost:3000) to this one (localhost:8000)
+    # -- different scheme makes them cross-site under "schemeful same-site",
+    # which Lax blocks for subresource requests. None+Secure is the standard
+    # fix for a genuinely cross-origin frontend/backend pair like this one.
+    resp.set_cookie(
+        SESSION_COOKIE, session_id,
+        httponly=True, secure=True, samesite="none", max_age=60 * 60 * 24 * 30,
+    )
+    return resp
+
+
+@api.get("/frameio/oauth/status")
+async def frameio_oauth_status(
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+):
+    session = await _get_valid_frameio_token(fio_session)
+    return {"connected": bool(session and session.account_id)}
+
+
+@api.post("/frameio/oauth/disconnect")
+async def frameio_oauth_disconnect(
+    response: Response,
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+):
+    if fio_session:
+        await frameio_sessions_col.delete_one({"id": fio_session})
+    response.delete_cookie(SESSION_COOKIE)
+    return {"disconnected": True}
 
 
 @api.post("/analyses")
@@ -376,6 +616,7 @@ async def create_analysis(
     password: Optional[str] = Form(None),
     auto_post: bool = Form(True),
     video: Optional[UploadFile] = File(None),
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ):
     if not frameio_url and not video:
         raise HTTPException(
@@ -399,7 +640,7 @@ async def create_analysis(
         with open(video_local_path, "wb") as out:
             shutil.copyfileobj(video.file, out)
 
-    background.add_task(_run_pipeline, analysis.id, video_local_path)
+    background.add_task(_run_pipeline, analysis.id, video_local_path, fio_session)
     d = analysis.model_dump()
     d.pop("password", None)
     return d
@@ -427,15 +668,16 @@ async def get_analysis(analysis_id: str):
 
 
 @api.post("/analyses/{analysis_id}/issues/{issue_id}/post")
-async def post_single_issue(analysis_id: str, issue_id: str):
-    """Post one specific issue to Frame.io as a guest comment."""
+async def post_single_issue(
+    analysis_id: str,
+    issue_id: str,
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+):
+    """Post one specific issue to Frame.io -- official API if connected and
+    this identity can reach the file, guest comment otherwise."""
     a = await _load(analysis_id)
     if not a:
         raise HTTPException(404, "Not found")
-    if not a.frameio_url or not frameio_service.is_share_link(a.frameio_url):
-        raise HTTPException(
-            400, "Only Frame.io share links support guest comment posting."
-        )
     idx = next(
         (i for i, x in enumerate(a.issues) if x.id == issue_id), None
     )
@@ -445,57 +687,39 @@ async def post_single_issue(analysis_id: str, issue_id: str):
     if issue.posted_to_frameio:
         return {"posted": False, "already": True}
 
-    result = await frameio_service.submit_guest_comments(
-        a.frameio_url,
-        a.password,
-        [{"timestamp_sec": issue.timestamp_sec, "text": _format_comment(issue)}],
-    )
-    flags = result.get("posted_flags") or [False]
-    if flags[0]:
-        a.issues[idx].posted_to_frameio = True
+    session = await _get_valid_frameio_token(fio_session)
+    result = await _post_issues_to_frameio(a, [issue], session)
+    if result["posted"]:
         a.posted_count = sum(1 for i in a.issues if i.posted_to_frameio)
         await _save(a)
-        return {"posted": True}
+        return {"posted": True, "posted_via": issue.posted_via}
     return {
         "posted": False,
-        "error": result.get("error") or "Frame.io rejected the comment.",
+        "error": result["error"] or "Frame.io rejected the comment.",
     }
 
 
 @api.post("/analyses/{analysis_id}/post")
-async def manual_post(analysis_id: str):
+async def manual_post(
+    analysis_id: str,
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+):
     a = await _load(analysis_id)
     if not a:
         raise HTTPException(404, "Not found")
-    if not a.frameio_url or not frameio_service.is_share_link(a.frameio_url):
-        raise HTTPException(
-            400, "Only Frame.io share links support guest comment posting."
-        )
 
-    unposted_idx = [i for i, x in enumerate(a.issues) if not x.posted_to_frameio]
-    if not unposted_idx:
+    unposted = [x for x in a.issues if not x.posted_to_frameio]
+    if not unposted:
         return {"posted": 0, "total_posted": a.posted_count}
 
-    payloads = [
-        {
-            "timestamp_sec": a.issues[i].timestamp_sec,
-            "text": _format_comment(a.issues[i]),
-        }
-        for i in unposted_idx
-    ]
-    result = await frameio_service.submit_guest_comments(
-        a.frameio_url, a.password, payloads
-    )
-    flags = result.get("posted_flags") or []
-    for j, idx in enumerate(unposted_idx):
-        if j < len(flags) and flags[j]:
-            a.issues[idx].posted_to_frameio = True
+    session = await _get_valid_frameio_token(fio_session)
+    result = await _post_issues_to_frameio(a, unposted, session)
     a.posted_count = sum(1 for i in a.issues if i.posted_to_frameio)
     await _save(a)
     return {
-        "posted": result.get("posted", 0),
+        "posted": result["posted"],
         "total_posted": a.posted_count,
-        "error": result.get("error"),
+        "error": result["error"],
     }
 
 
