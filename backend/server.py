@@ -278,6 +278,9 @@ async def _run_pipeline(
         if not analysis:
             return
 
+        allowlist_terms = ai_service.parse_allowlist(analysis.allowlist)
+        allowlist_set = {t.lower() for t in allowlist_terms}
+
         fio_session = await _get_valid_frameio_token(frameio_session_id)
         # Set only if the official API actually resolved this file (i.e. it's
         # in a project the connected account belongs to) -- gates whether
@@ -413,7 +416,7 @@ async def _run_pipeline(
         async def _analyze_one(inst: dict):
             _, fpath = frames[inst["frame_index"]]
             async with sem:
-                errs = await ai_service.analyze_frame(fpath)
+                errs = await ai_service.analyze_frame(fpath, allowlist_terms)
             thumb = await asyncio.to_thread(
                 ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
             )
@@ -432,6 +435,8 @@ async def _run_pipeline(
                 thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
                 for e in errs:
                     if e.get("type") in SKIPPED_ISSUE_TYPES:
+                        continue
+                    if (e.get("original") or "").strip().lower() in allowlist_set:
                         continue
                     all_issues.append(
                         Issue(
@@ -491,8 +496,10 @@ async def _run_pipeline(
             await _set_status(
                 analysis_id, message="Checking transcript...", progress=82
             )
-            for e in await ai_service.analyze_transcript(analysis.transcript):
+            for e in await ai_service.analyze_transcript(analysis.transcript, allowlist_terms):
                 if e.get("type") in SKIPPED_ISSUE_TYPES:
+                    continue
+                if (e.get("original") or "").strip().lower() in allowlist_set:
                     continue
                 all_issues.append(
                     Issue(
@@ -647,6 +654,7 @@ async def create_analysis(
     password: Optional[str] = Form(None),
     auto_post: bool = Form(True),
     check_contrast: bool = Form(False),
+    allowlist: Optional[str] = Form(None),
     video: Optional[UploadFile] = File(None),
     fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ):
@@ -662,6 +670,7 @@ async def create_analysis(
         password=password,
         auto_post=auto_post,
         check_contrast=check_contrast,
+        allowlist=allowlist,
         video_filename=video.filename if video else None,
     )
     await _save(analysis)
