@@ -10,4 +10,8 @@
 # Linux deployment target; restart this script manually after code changes.
 $env:PYTHONUTF8 = "1"
 Set-Location $PSScriptRoot
-& ".\.venv\Scripts\python.exe" -m uvicorn server:app --port 8000
+# HTTPS via mkcert (backend/certs) -- required for the Frame.io OAuth redirect
+# URI, which Adobe rejects as plain http:// even for localhost.
+& ".\.venv\Scripts\python.exe" -m uvicorn server:app --port 8000 `
+    --ssl-keyfile ".\certs\localhost+2-key.pem" `
+    --ssl-certfile ".\certs\localhost+2.pem"
