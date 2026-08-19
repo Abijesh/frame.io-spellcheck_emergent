@@ -80,6 +80,10 @@ FRAME_INTERVAL = float(os.environ.get("FRAME_SAMPLE_INTERVAL", "0.5"))
 # Gemini not to flag these, but that's not a guarantee -- drop them here too
 # so a model slip-up never reaches a user.
 SKIPPED_ISSUE_TYPES = {"punctuation", "capitalization"}
+# Soft-deleted analyses (and their embedded base64 thumbnails) are kept
+# recoverable for this long, then permanently purged -- see _purge_loop.
+PURGE_AFTER_DAYS = int(os.environ.get("PURGE_AFTER_DAYS", "30"))
+PURGE_INTERVAL_SEC = 24 * 60 * 60
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 OAUTH_STATE_COOKIE = "fio_oauth_state"
 SESSION_COOKIE = "fio_session"
@@ -829,11 +833,10 @@ async def export_csv(analysis_id: str):
 
 @api.delete("/analyses/{analysis_id}")
 async def delete_analysis(analysis_id: str):
-    """Soft delete: hides the analysis from history without erasing it, so
-    it can still be recovered later (permanent purge is a separate, not yet
-    built, step)."""
+    """Soft delete: hides the analysis from history without erasing it.
+    Permanently purged after PURGE_AFTER_DAYS by the background task below."""
     res = await analyses_col.update_one(
-        {"id": analysis_id}, {"$set": {"deleted": True}}
+        {"id": analysis_id}, {"$set": {"deleted": True, "deleted_at": _now_iso()}}
     )
     return {"deleted": res.modified_count > 0}
 
@@ -892,6 +895,39 @@ async def ensure_runtime_deps():
             logger.warning("Playwright install at startup failed: %s", exc)
 
 
+async def _purge_old_deleted() -> int:
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=PURGE_AFTER_DAYS)
+    ).isoformat()
+    res = await analyses_col.delete_many(
+        {"deleted": True, "deleted_at": {"$lt": cutoff}}
+    )
+    if res.deleted_count:
+        logger.info("Purged %d soft-deleted analyses older than %d days",
+                     res.deleted_count, PURGE_AFTER_DAYS)
+    return res.deleted_count
+
+
+async def _purge_loop():
+    while True:
+        try:
+            await _purge_old_deleted()
+        except Exception as exc:
+            logger.warning("Purge pass failed: %s", exc)
+        await asyncio.sleep(PURGE_INTERVAL_SEC)
+
+
+_purge_task: Optional[asyncio.Task] = None
+
+
+@app.on_event("startup")
+async def start_purge_loop():
+    global _purge_task
+    _purge_task = asyncio.create_task(_purge_loop())
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    if _purge_task:
+        _purge_task.cancel()
     client.close()
