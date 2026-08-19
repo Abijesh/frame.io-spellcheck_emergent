@@ -43,6 +43,7 @@ class Analysis(BaseModel):
     transcript: Optional[str] = None
     password: Optional[str] = None
     auto_post: bool = True
+    check_contrast: bool = False
     password_required: bool = False
 
     status: str = "queued"  # queued | downloading | extracting | analyzing | posting | done | failed
@@ -58,6 +59,7 @@ class Analysis(BaseModel):
     posted_count: int = 0
     post_error: Optional[str] = None
     error: Optional[str] = None
+    deleted: bool = False
 
 
 class AnalyzeRequest(BaseModel):
