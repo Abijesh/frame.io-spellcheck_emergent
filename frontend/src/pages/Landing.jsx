@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock, CheckCircle2 } from "lucide-react";
+import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock, CheckCircle2, Tags } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +35,7 @@ export default function Landing() {
   const [password, setPassword] = useState("");
   const [autoPost, setAutoPost] = useState(false);
   const [checkContrast, setCheckContrast] = useState(false);
+  const [allowlist, setAllowlist] = useState("");
   const [videoFile, setVideoFile] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [cfg, setCfg] = useState({
@@ -92,6 +93,7 @@ export default function Landing() {
         password: password || null,
         autoPost,
         checkContrast,
+        allowlist,
         videoFile,
       });
       toast.success("Analysis started.");
@@ -268,6 +270,25 @@ export default function Landing() {
                     onChange={(e) => setTranscript(e.target.value)}
                     rows={3}
                     placeholder="Paste the script if you have one — gives more accurate grammar feedback."
+                    className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm resize-none"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="allowlist"
+                    className="font-mono-tech text-xs uppercase tracking-widest text-zinc-500"
+                  >
+                    <Tags className="inline w-3 h-3 mr-1" />
+                    Allowlist (optional)
+                  </Label>
+                  <Textarea
+                    id="allowlist"
+                    data-testid="allowlist-input"
+                    value={allowlist}
+                    onChange={(e) => setAllowlist(e.target.value)}
+                    rows={2}
+                    placeholder="Character names, brand terms, slang — comma or newline separated. Won't be flagged as spelling errors."
                     className="bg-black border-zinc-800 text-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 text-sm resize-none"
                   />
                 </div>
