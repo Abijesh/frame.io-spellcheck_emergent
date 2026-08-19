@@ -61,6 +61,7 @@ class Analysis(BaseModel):
     post_error: Optional[str] = None
     error: Optional[str] = None
     deleted: bool = False
+    deleted_at: Optional[str] = None
 
 
 class AnalyzeRequest(BaseModel):
