@@ -1,14 +1,20 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock } from "lucide-react";
+import { ArrowRight, Link2, Upload, Sparkles, FileText, Zap, Eye, Lock, CheckCircle2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { createAnalysis, getConfig } from "@/lib/api";
+import {
+  createAnalysis,
+  getConfig,
+  getFrameioStatus,
+  connectFrameioUrl,
+  disconnectFrameio,
+} from "@/lib/api";
 
 const Feature = ({ icon: Icon, title, desc, testid }) => (
   <div
@@ -23,6 +29,7 @@ const Feature = ({ icon: Icon, title, desc, testid }) => (
 
 export default function Landing() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [url, setUrl] = useState("");
   const [transcript, setTranscript] = useState("");
   const [password, setPassword] = useState("");
@@ -33,10 +40,42 @@ export default function Landing() {
     llm_configured: false,
     guest_name: "Spellchecker",
   });
+  const [frameioConnected, setFrameioConnected] = useState(false);
+
+  const refreshFrameioStatus = () => {
+    getFrameioStatus()
+      .then((d) => setFrameioConnected(!!d.connected))
+      .catch(() => setFrameioConnected(false));
+  };
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
+    refreshFrameioStatus();
   }, []);
+
+  useEffect(() => {
+    const result = searchParams.get("frameio_connect");
+    if (!result) return;
+    if (result === "success") {
+      toast.success("Frame.io account connected.");
+      refreshFrameioStatus();
+    } else {
+      toast.error("Could not connect your Frame.io account. Please try again.");
+    }
+    searchParams.delete("frameio_connect");
+    setSearchParams(searchParams, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const onDisconnectFrameio = async () => {
+    try {
+      await disconnectFrameio();
+      setFrameioConnected(false);
+      toast.success("Frame.io account disconnected.");
+    } catch (e) {
+      toast.error("Failed to disconnect.");
+    }
+  };
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -120,17 +159,42 @@ export default function Landing() {
                 data-testid="analyze-form"
                 className="border border-zinc-800 bg-zinc-950/80 backdrop-blur-xl p-8 space-y-6"
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <h2 className="font-display font-bold text-xl tracking-tight">
                     Start a review
                   </h2>
-                  <span
-                    className="font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border border-brand-500 text-brand-500"
-                    data-testid="guest-badge"
-                  >
-                    Guest: {cfg.guest_name || "Spellchecker"}
-                  </span>
+                  {frameioConnected ? (
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border border-emerald-600 text-emerald-500 flex items-center gap-1"
+                        data-testid="frameio-connected-badge"
+                      >
+                        <CheckCircle2 className="w-3 h-3" /> Frame.io connected
+                      </span>
+                      <button
+                        type="button"
+                        onClick={onDisconnectFrameio}
+                        data-testid="frameio-disconnect-btn"
+                        className="text-[10px] text-zinc-600 hover:text-zinc-400 underline underline-offset-2"
+                      >
+                        Disconnect
+                      </button>
+                    </div>
+                  ) : (
+                    <a
+                      href={connectFrameioUrl}
+                      data-testid="frameio-connect-btn"
+                      className="font-mono-tech text-[10px] uppercase tracking-widest px-2 py-1 border border-brand-500 text-brand-500 hover:bg-brand-500 hover:text-zinc-950 transition-colors"
+                    >
+                      Connect Frame.io
+                    </a>
+                  )}
                 </div>
+                <p className="text-xs text-zinc-600 -mt-4" data-testid="posting-mode-hint">
+                  {frameioConnected
+                    ? "Comments post through your connected Frame.io account, with frame-accurate timestamps."
+                    : `Not connected — comments post as guest "${cfg.guest_name || "Spellchecker"}" instead.`}
+                </p>
 
                 <div className="space-y-2">
                   <Label
