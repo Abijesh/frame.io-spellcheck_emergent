@@ -62,9 +62,16 @@ def get_fps(video_path: str) -> float:
 
 
 async def extract_frames(
-    video_path: str, out_dir: str, interval_seconds: float = 2.0
+    video_path: str, out_dir: str, interval_seconds: float
 ) -> List[Tuple[float, str]]:
-    """Extract one frame every `interval_seconds`. Returns list of (timestamp, path)."""
+    """Extract one frame every `interval_seconds`. Returns list of (timestamp, path).
+
+    No default here on purpose: the caller (server.py's FRAME_INTERVAL) is
+    the single source of truth for the sampling interval -- a stale default
+    here (this used to say 2.0, from the old fixed-interval architecture)
+    would silently lie about what actually runs if anyone ever called this
+    without passing it explicitly.
+    """
     os.makedirs(out_dir, exist_ok=True)
     pattern = os.path.join(out_dir, "frame_%05d.jpg")
     fps = 1.0 / max(interval_seconds, 0.1)
