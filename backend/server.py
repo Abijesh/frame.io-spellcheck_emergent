@@ -812,6 +812,41 @@ async def get_analysis(analysis_id: str):
     return d
 
 
+@api.get("/analyses/{analysis_id}/video-url")
+async def get_video_url(
+    analysis_id: str,
+    fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
+):
+    """Resolves a fresh, directly-playable video URL on demand for the
+    inline player. Never persisted or cached -- signed URLs expire, and the
+    pipeline already deliberately never keeps the video itself, so this
+    stays consistent with that and just re-resolves each time it's asked."""
+    a = await _load(analysis_id)
+    if not a:
+        raise HTTPException(404, "Not found")
+
+    if a.frameio_asset_id:
+        session = await _get_valid_frameio_token(fio_session)
+        _, url = await _resolve_reachable_account_id(session, a.frameio_asset_id)
+        if url:
+            return {"video_url": url}
+
+    if a.frameio_url and frameio_service.is_share_link(a.frameio_url):
+        info = await frameio_service.resolve_share_video(a.frameio_url, a.password)
+        if info.get("video_url"):
+            return {"video_url": info["video_url"]}
+        return {
+            "video_url": None,
+            "error": info.get("error") or "Could not load the video from Frame.io.",
+        }
+
+    return {
+        "video_url": None,
+        "error": "This analysis ran on an uploaded file, which isn't kept "
+        "after processing, so there's no video to play back.",
+    }
+
+
 @api.post("/analyses/{analysis_id}/issues/{issue_id}/post")
 async def post_single_issue(
     analysis_id: str,
