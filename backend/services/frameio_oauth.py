@@ -45,6 +45,12 @@ def build_authorize_url(state: str) -> str:
         "scope": SCOPES,
         "response_type": "code",
         "state": state,
+        # Adobe IMS docs: "prompt=login -- Even if the user is authenticated,
+        # they will see the login screen." Without this, IMS silently reuses
+        # an existing browser session and redirects straight back with no
+        # visible confirmation step -- surprising for an explicit "Connect
+        # your account" action, and easy to mistake for a stuck/broken button.
+        "prompt": "login",
     }
     return f"{IMS_AUTHORIZE_URL}?{urlencode(params)}"
 
