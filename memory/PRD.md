@@ -34,6 +34,27 @@ back on the Frame.io asset at the exact timestamps. (Animation studio QA tool.)
   only checks (contrast) for every remaining instance, and records
   `quota_exceeded` / `unchecked_instances` on the analysis with a plain-
   language note in the completion message.
+- **Concurrency (2026-08-20)**: `POST /api/analyses` used to hand each
+  request straight to FastAPI's `BackgroundTasks`, so N concurrent
+  submissions meant N full pipelines running at once with no cap, no
+  ordering, and each spinning up its own fresh `asyncio.Semaphore(3)` for
+  Gemini calls -- meaning the *actual* concurrent Gemini call count was
+  unbounded across users even though each run looked capped in isolation.
+  Replaced with a fixed pool of `PIPELINE_WORKERS` (default 2) pulling from
+  a shared `asyncio.PriorityQueue`, keyed by video duration when it's known
+  up front (uploaded files, via ffprobe at enqueue time) so a short video
+  doesn't sit stuck behind a long one already queued; share-link jobs, whose
+  duration isn't known until they're downloaded inside the pipeline, get a
+  fixed 120s stand-in priority rather than either extreme. A single
+  module-level `gemini_semaphore` (default 3 in flight) is now shared by
+  every run instead of one per run. Also fixed the 429 handling to actually
+  distinguish Google's two different meanings for the same HTTP 429: a
+  transient per-minute rate limit carries a `RetryInfo.retryDelay` and is
+  now retried (`ai_service.GeminiRateLimited`, up to `GEMINI_MAX_RETRIES`),
+  while a hard daily-quota 429 has no `RetryInfo` at all and still raises
+  `GeminiQuotaExceeded` as before. Previously every 429 was treated as the
+  hard case, so a video could get marked "quota exceeded, rest unchecked"
+  over a rate limit that would've cleared in a few seconds.
 - **Investigated and reverted (2026-08-20)**: content-adaptive frame
   extraction via ffmpeg's `mpdecimate` filter, to replace fixed-interval
   sampling with "keep a frame only when the picture changes, but never skip
@@ -135,6 +156,11 @@ official path at all.
 - [x] Optional brand/name/slang allowlist (landing page field): injected
       into the Gemini prompt and defensively post-filtered server-side
       (`ai_service.parse_allowlist`), same pattern as `SKIPPED_ISSUE_TYPES`
+- [x] Shared job queue + worker pool (`PIPELINE_WORKERS`) with
+      duration-based priority replacing raw `BackgroundTasks`; a single
+      shared `gemini_semaphore` across all concurrent runs; 429 handling
+      distinguishes a retryable per-minute rate limit from a hard daily
+      quota wall (see Architecture)
 - [x] Inline video player on the Analysis page with click-to-seek per issue.
       `GET /api/analyses/{id}/video-url` resolves a fresh, directly-playable
       URL on demand (official API if reachable, guest-scrape otherwise) --
