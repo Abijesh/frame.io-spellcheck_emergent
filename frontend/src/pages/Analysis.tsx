@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -10,13 +10,14 @@ import {
   ArrowLeft,
   Loader2,
   Download,
+  PlayCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { getAnalysis, postComments, postSingleIssue, API } from "@/lib/api";
+import { getAnalysis, postComments, postSingleIssue, getVideoUrl, API } from "@/lib/api";
 import type { Analysis as AnalysisData, AnalysisStatus, Issue, IssueType, Severity } from "@/types";
 
 const formatTime = (sec: number | null | undefined): string => {
@@ -65,6 +66,18 @@ export default function Analysis() {
   const { id } = useParams<{ id: string }>();
   const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
   const [posting, setPosting] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoFetched = useRef(false);
+
+  const seekTo = (sec: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = sec;
+    v.play().catch(() => {});
+  };
 
   const load = useCallback(async () => {
     if (!id) return null;
@@ -94,6 +107,19 @@ export default function Analysis() {
       if (timer) clearTimeout(timer);
     };
   }, [load]);
+
+  useEffect(() => {
+    if (analysis?.status !== "done" || videoFetched.current) return;
+    videoFetched.current = true;
+    setVideoLoading(true);
+    getVideoUrl(id!)
+      .then((res) => {
+        if (res.video_url) setVideoUrl(res.video_url);
+        else setVideoError(res.error || "Video not available.");
+      })
+      .catch(() => setVideoError("Could not load the video."))
+      .finally(() => setVideoLoading(false));
+  }, [analysis?.status, id]);
 
   const onPost = async () => {
     if (!id) return;
@@ -189,6 +215,32 @@ export default function Analysis() {
             )}
           </div>
         </div>
+
+        {analysis.status === "done" && (videoUrl || videoLoading || videoError) && (
+          <div className="mt-6" data-testid="video-player-section">
+            {videoUrl ? (
+              <video
+                ref={videoRef}
+                src={videoUrl}
+                controls
+                preload="metadata"
+                data-testid="analysis-video"
+                className="w-full max-h-[480px] bg-black border border-zinc-800"
+              />
+            ) : videoLoading ? (
+              <div className="flex items-center gap-2 text-sm text-zinc-500 border border-zinc-800 bg-black p-6">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading video…
+              </div>
+            ) : (
+              <div
+                className="flex items-center gap-2 text-sm text-zinc-600 border border-zinc-800 bg-black p-6"
+                data-testid="video-unavailable"
+              >
+                <PlayCircle className="w-4 h-4 shrink-0" /> {videoError}
+              </div>
+            )}
+          </div>
+        )}
 
         <Separator className="my-6 bg-zinc-900" />
 
@@ -291,6 +343,7 @@ export default function Analysis() {
                       analysis.frameio_url.match(/(f\.io\/|next\.frame\.io\/share\/)/)
                   )}
                   onPosted={() => load()}
+                  onSeek={videoUrl ? seekTo : undefined}
                 />
               ))}
           </div>
@@ -328,15 +381,21 @@ const IssueRow = ({
   analysisId,
   canPost,
   onPosted,
+  onSeek,
 }: {
   issue: Issue;
   analysisId: string;
   canPost: boolean;
   onPosted: () => void;
+  onSeek?: (sec: number) => void;
 }) => {
   const [posting, setPosting] = useState(false);
   const hasRange =
     issue.timestamp_sec >= 0 && issue.end_sec != null && issue.end_sec > issue.timestamp_sec;
+  const canSeek = Boolean(onSeek) && issue.timestamp_sec >= 0;
+  const handleSeek = () => {
+    if (canSeek) onSeek!(issue.timestamp_sec);
+  };
 
   const handlePost = async () => {
     setPosting(true);
@@ -362,8 +421,19 @@ const IssueRow = ({
       data-testid="issue-row"
       className="p-6 hover:bg-zinc-900/30 transition-colors duration-200 flex gap-6"
     >
-      <div className="shrink-0 w-24">
-        <div className="font-mono-tech text-sm text-brand-500 flex items-center gap-1">
+      <button
+        type="button"
+        onClick={handleSeek}
+        disabled={!canSeek}
+        data-testid={`seek-btn-${issue.id}`}
+        className={`shrink-0 w-24 text-left ${canSeek ? "cursor-pointer group" : "cursor-default"}`}
+        title={canSeek ? `Jump to ${formatTime(issue.timestamp_sec)} in the video` : undefined}
+      >
+        <div
+          className={`font-mono-tech text-sm text-brand-500 flex items-center gap-1 ${
+            canSeek ? "group-hover:underline" : ""
+          }`}
+        >
           <Clock className="w-3 h-3 shrink-0" />
           {issue.timestamp_sec >= 0 ? formatTime(issue.timestamp_sec) : "Script"}
           {hasRange && <span className="text-zinc-600">–{formatTime(issue.end_sec)}</span>}
@@ -371,14 +441,17 @@ const IssueRow = ({
         <div className="font-mono-tech text-[10px] text-zinc-600 mt-1">
           {issue.timestamp_sec >= 0 ? `${Math.round(issue.timestamp_sec)}s` : "Transcript"}
         </div>
-      </div>
+      </button>
 
       {issue.thumbnail_b64 && (
         <div className="shrink-0">
           <img
             src={`data:image/jpeg;base64,${issue.thumbnail_b64}`}
             alt={`On-screen text: ${issue.original}`}
-            className="w-36 h-16 object-contain border border-zinc-800 bg-zinc-900"
+            onClick={canSeek ? handleSeek : undefined}
+            className={`w-36 h-16 object-contain border border-zinc-800 bg-zinc-900 ${
+              canSeek ? "cursor-pointer hover:border-brand-700" : ""
+            }`}
           />
         </div>
       )}
