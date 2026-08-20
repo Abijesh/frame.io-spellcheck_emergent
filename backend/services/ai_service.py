@@ -8,11 +8,20 @@ import re
 from typing import List, Optional
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3-flash-preview"
+
+
+class GeminiQuotaExceeded(Exception):
+    """Raised when Gemini reports the request quota is exhausted (HTTP 429 /
+    RESOURCE_EXHAUSTED), so callers can tell "we couldn't check this" apart
+    from "we checked it and found nothing" -- previously both cases silently
+    returned an empty list, so a quota wall partway through a video looked
+    identical to a clean pass."""
 
 FRAME_SYSTEM = (
     "You are a meticulous proofreader for animation/video QA. "
@@ -116,6 +125,11 @@ async def analyze_frame(
                 response_mime_type="application/json",
             ),
         )
+    except genai_errors.APIError as exc:
+        if exc.code == 429:
+            raise GeminiQuotaExceeded(str(exc)) from exc
+        logger.warning("Gemini frame call failed: %s", exc)
+        return []
     except Exception as exc:
         logger.warning("Gemini frame call failed: %s", exc)
         return []
@@ -161,6 +175,11 @@ async def analyze_transcript(
                 response_mime_type="application/json",
             ),
         )
+    except genai_errors.APIError as exc:
+        if exc.code == 429:
+            raise GeminiQuotaExceeded(str(exc)) from exc
+        logger.warning("Gemini transcript call failed: %s", exc)
+        return []
     except Exception as exc:
         logger.warning("Gemini transcript call failed: %s", exc)
         return []
