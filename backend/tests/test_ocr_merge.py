@@ -9,11 +9,24 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from services.ocr_service import merge_instances  # noqa: E402
+from services.ocr_service import merge_instances, _parse_hits  # noqa: E402
 
 
 def _hit(text, conf=0.9, box=(0, 0, 100, 20)):
     return {"text": text, "bbox": box, "conf": conf}
+
+
+def _raw(text, conf=0.9, bbox=((0, 0), (100, 0), (100, 20), (0, 20))):
+    """EasyOCR's own raw (bbox, text, conf) tuple shape."""
+    return (bbox, text, conf)
+
+
+def test_parse_hits_drops_isolated_single_characters():
+    # Shared by both ocr_frame (single image) and ocr_frames_batch (many
+    # images in one GPU call) -- both must apply the same noise filter.
+    raw = [_raw("M", conf=0.99), _raw("Chapter Two", conf=0.7), _raw("7", conf=0.95)]
+    hits = _parse_hits(raw)
+    assert [h["text"] for h in hits] == ["Chapter Two"]
 
 
 def test_merges_consecutive_matching_frames_into_one_instance():
@@ -131,6 +144,7 @@ def test_falls_back_to_highest_confidence_when_nothing_ever_settles():
 
 
 if __name__ == "__main__":
+    test_parse_hits_drops_isolated_single_characters()
     test_merges_consecutive_matching_frames_into_one_instance()
     test_dissimilar_text_starts_a_new_instance()
     test_empty_frame_closes_the_open_instance()
