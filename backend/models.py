@@ -80,5 +80,10 @@ class FrameioSession(BaseModel):
     access_token: str
     refresh_token: str
     expires_at: str  # ISO timestamp
-    account_id: Optional[str] = None
+    # A single Adobe identity can belong to several Frame.io accounts (a
+    # personal account plus one or more team workspaces) with no "default"
+    # indicated anywhere in the API -- so we keep all of them and try each
+    # one when resolving whether a given file is reachable, instead of
+    # guessing the first one is the right one.
+    account_ids: List[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=_now_iso)
