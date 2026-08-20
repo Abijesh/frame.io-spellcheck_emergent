@@ -48,4 +48,6 @@ export interface Analysis {
   posted_count: number;
   post_error: string | null;
   error: string | null;
+  quota_exceeded: boolean;
+  unchecked_instances: number;
 }
