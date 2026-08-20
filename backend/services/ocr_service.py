@@ -18,6 +18,7 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.6  # consecutive frames counted as "same text"
+STABILITY_SHIFT_THRESHOLD = 0.08  # fraction of text-box size counted as "settled"
 
 # WCAG 2.x contrast minimums: 4.5:1 for normal text, 3:1 for "large" text
 # (>=~24px / bold >=~19px, using box height as a proxy for point size here).
@@ -72,6 +73,29 @@ def _signature(frame_results: List[dict]) -> str:
     return " ".join(r["text"] for r in frame_results).strip().lower()
 
 
+def _bbox_union(ocr_results: List[dict]) -> Optional[Tuple[float, float, float, float]]:
+    if not ocr_results:
+        return None
+    xs0 = [r["bbox"][0] for r in ocr_results]
+    ys0 = [r["bbox"][1] for r in ocr_results]
+    xs1 = [r["bbox"][2] for r in ocr_results]
+    ys1 = [r["bbox"][3] for r in ocr_results]
+    return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+def _bbox_shift(a: Optional[Tuple], b: Optional[Tuple]) -> float:
+    """How much a text box moved/resized between two frames, as a fraction of
+    its own size: ~0 means visually settled (same place, same size as the
+    other frame), large means it's still animating in/out (sliding, scaling,
+    a wipe mask moving across it, etc)."""
+    if a is None or b is None:
+        return float("inf")
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    size = max(ax1 - ax0, ay1 - ay0, 1.0)
+    return (abs(ax0 - bx0) + abs(ay0 - by0) + abs(ax1 - bx1) + abs(ay1 - by1)) / size
+
+
 def merge_instances(
     frames: List[Tuple[float, List[dict]]],
     similarity_threshold: float = SIMILARITY_THRESHOLD,
@@ -83,8 +107,14 @@ def merge_instances(
 
     Returns one dict per distinct piece of on-screen text:
     {"start": float, "end": float, "frame_index": int, "ocr_results": [...]}
-    — frame_index/ocr_results point at the frame with the highest total OCR
-    confidence in that instance's span, used as Gemini's input.
+    — frame_index/ocr_results point at the representative frame used as both
+    Gemini's input and the contrast check's input: preferentially a visually
+    *settled* frame (its text box barely moved/resized versus a neighboring
+    sample, so it's not mid-animation-in/out and won't read blurry or
+    distorted), tie-broken by highest total OCR confidence. Falls back to
+    pure highest-confidence if no sample ever looks settled (e.g. only one
+    sample landed in the instance's span, or the text never stops moving --
+    a fast ticker).
 
     Ponytail: similarity is judged on the whole frame's concatenated text
     (via difflib against the *previous matched* frame, not the instance's
@@ -121,8 +151,20 @@ def merge_instances(
         current_sig = sig
 
     for inst in instances:
+        frame_idxs = inst["frames"]
+        boxes = [_bbox_union(frames[i][1]) for i in frame_idxs]
+        shifts = [
+            _bbox_shift(boxes[k - 1], boxes[k]) for k in range(1, len(frame_idxs))
+        ]
+        stable_positions = set()
+        for k, shift in enumerate(shifts):
+            if shift <= STABILITY_SHIFT_THRESHOLD:
+                stable_positions.add(k)
+                stable_positions.add(k + 1)
+        candidates = [frame_idxs[p] for p in stable_positions] or frame_idxs
+
         best_idx = max(
-            inst["frames"], key=lambda i: sum(r["conf"] for r in frames[i][1])
+            candidates, key=lambda i: sum(r["conf"] for r in frames[i][1])
         )
         inst["frame_index"] = best_idx
         inst["ocr_results"] = frames[best_idx][1]
