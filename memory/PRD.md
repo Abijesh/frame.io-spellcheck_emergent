@@ -38,7 +38,7 @@ back on the Frame.io asset at the exact timestamps. (Animation studio QA tool.)
     member of.
   - **Anonymous (guest, Playwright)**: headless Chromium opens the public
     share link, scrapes the signed video URL, posts comments by simulating
-    keyboard seeks + typing as guest "Spellchecker". The only way to handle
+    keyboard seeks + typing as guest "Proof.io". The only way to handle
     a share link from someone else's account (no official share-lookup
     endpoint exists).
   - Every V4 request and response body is wrapped in a JSON:API-style

@@ -54,7 +54,7 @@ export default function Landing() {
   const [submitting, setSubmitting] = useState(false);
   const [cfg, setCfg] = useState({
     llm_configured: false,
-    guest_name: "Spellchecker",
+    guest_name: "Proof.io",
   });
   const [frameioConnected, setFrameioConnected] = useState(false);
 
@@ -221,7 +221,7 @@ export default function Landing() {
                 >
                   {frameioConnected
                     ? "Comments post through your connected Frame.io account, with frame-accurate timestamps."
-                    : `Not connected — comments post as guest "${cfg.guest_name || "Spellchecker"}" instead.`}
+                    : `Not connected — comments post as guest "${cfg.guest_name || "Proof.io"}" instead.`}
                 </p>
 
                 <div className="space-y-2">

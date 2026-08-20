@@ -28,7 +28,7 @@ def test_config_only_expected_keys(session):
     data = r.json()
     assert set(data.keys()) == {"llm_configured", "frame_interval", "guest_name"}, data
     assert data["llm_configured"] is True
-    assert data["guest_name"] == "Spellchecker"
+    assert data["guest_name"] == "Proof.io"
 
 
 # ---------- Adobe routes are dead ----------

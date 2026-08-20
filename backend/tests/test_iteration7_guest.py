@@ -30,7 +30,7 @@ class TestConfig:
         assert "llm_configured" in data
         assert "frame_interval" in data
         assert "guest_name" in data
-        assert data["guest_name"] == "Spellchecker"
+        assert data["guest_name"] == "Proof.io"
         assert isinstance(data["llm_configured"], bool)
         assert isinstance(data["frame_interval"], (int, float))
         # Adobe-related keys MUST be absent

@@ -75,7 +75,7 @@ class TestConfigRegression:
         r = requests.get(f"{API}/config", timeout=10)
         assert r.status_code == 200
         d = r.json()
-        assert d.get("guest_name") == "Spellchecker"
+        assert d.get("guest_name") == "Proof.io"
         assert "llm_configured" in d
         assert "frame_interval" in d
         for forbidden in ("adobe_connected", "adobe_user", "frameio_configured"):
