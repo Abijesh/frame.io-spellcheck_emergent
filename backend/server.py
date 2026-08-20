@@ -36,6 +36,7 @@ import os
 import secrets
 import shutil
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -291,6 +292,14 @@ async def _run_pipeline(
     frameio_session_id: Optional[str] = None,
 ) -> None:
     workdir = tempfile.mkdtemp(prefix=f"frameio_{analysis_id}_")
+    stage_t0 = time.monotonic()
+
+    def _log_stage(label: str) -> None:
+        nonlocal stage_t0
+        now = time.monotonic()
+        logger.info("Pipeline %s: %s took %.1fs", analysis_id, label, now - stage_t0)
+        stage_t0 = now
+
     try:
         analysis = await _load(analysis_id)
         if not analysis:
@@ -372,6 +381,8 @@ async def _run_pipeline(
                 )
                 return
 
+        _log_stage("resolving + downloading the video")
+
         duration = video_service.get_duration(video_path)
         fps = video_service.get_fps(video_path)
         await _set_status(
@@ -387,6 +398,7 @@ async def _run_pipeline(
         frames = await video_service.extract_frames(
             video_path, frames_dir, FRAME_INTERVAL
         )
+        _log_stage(f"ffmpeg frame extraction ({len(frames)} frames)")
 
         # Cheap local OCR pass: figure out which frames have text at all, and
         # merge consecutive matching frames into one instance per distinct
@@ -412,6 +424,10 @@ async def _run_pipeline(
                     message=f"Scanning frame {i + 1}/{len(frames)} for text...",
                 )
         instances = ocr_service.merge_instances(frame_results)
+        _log_stage(
+            f"local OCR scan ({len(frames)} frames -> {len(instances)} "
+            "text instance(s) after noise filtering)"
+        )
 
         await _set_status(
             analysis_id,
@@ -424,12 +440,23 @@ async def _run_pipeline(
 
         all_issues: List[Issue] = []
         completed = 0
+        unchecked_count = 0
+        quota_state = {"exceeded": False}
         sem = asyncio.Semaphore(3)  # cap concurrent Gemini calls
 
         async def _analyze_one(inst: dict):
             _, fpath = frames[inst["frame_index"]]
-            async with sem:
-                errs = await ai_service.analyze_frame(fpath, allowlist_terms)
+            errs: List[dict] = []
+            checked = False
+            if quota_state["exceeded"]:
+                pass  # already know every further call will 429 -- don't bother
+            else:
+                try:
+                    async with sem:
+                        errs = await ai_service.analyze_frame(fpath, allowlist_terms)
+                    checked = True
+                except ai_service.GeminiQuotaExceeded:
+                    quota_state["exceeded"] = True
             thumb = await asyncio.to_thread(
                 ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
             )
@@ -438,13 +465,15 @@ async def _run_pipeline(
                 contrast_hits = await asyncio.to_thread(
                     ocr_service.check_contrast, fpath, inst["ocr_results"]
                 )
-            return inst, errs, thumb, contrast_hits
+            return inst, errs, thumb, contrast_hits, checked
 
         async def _run_with_progress():
-            nonlocal completed
+            nonlocal completed, unchecked_count
             tasks = [asyncio.create_task(_analyze_one(inst)) for inst in instances]
             for fut in asyncio.as_completed(tasks):
-                inst, errs, thumb, contrast_hits = await fut
+                inst, errs, thumb, contrast_hits, checked = await fut
+                if not checked:
+                    unchecked_count += 1
                 thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
                 for e in errs:
                     if e.get("type") in SKIPPED_ISSUE_TYPES:
@@ -502,14 +531,30 @@ async def _run_pipeline(
                 )
 
         await _run_with_progress()
+        _log_stage(
+            f"Gemini + contrast analysis ({len(instances)} instance(s), "
+            f"{unchecked_count} unchecked)"
+        )
 
         # transcript pass (no timestamp)
         analysis = await _load(analysis_id)
-        if analysis and analysis.transcript:
+        if quota_state["exceeded"]:
+            logger.info(
+                "Pipeline %s: skipping transcript check, Gemini quota already "
+                "exceeded this run", analysis_id,
+            )
+        elif analysis and analysis.transcript:
             await _set_status(
                 analysis_id, message="Checking transcript...", progress=82
             )
-            for e in await ai_service.analyze_transcript(analysis.transcript, allowlist_terms):
+            try:
+                transcript_errs = await ai_service.analyze_transcript(
+                    analysis.transcript, allowlist_terms
+                )
+            except ai_service.GeminiQuotaExceeded:
+                quota_state["exceeded"] = True
+                transcript_errs = []
+            for e in transcript_errs:
                 if e.get("type") in SKIPPED_ISSUE_TYPES:
                     continue
                 if (e.get("original") or "").strip().lower() in allowlist_set:
@@ -554,6 +599,14 @@ async def _run_pipeline(
             post_err_msg = result["error"]
 
         posted_via_official = any(i.posted_via == "official_api" for i in postable)
+        quota_note = (
+            f" {unchecked_count} on-screen text instance(s) could not be "
+            "checked -- Gemini's quota ran out partway through. Issues "
+            "found before that point are real and kept; the unchecked "
+            "instances are simply unknown, not confirmed clean."
+            if quota_state["exceeded"]
+            else ""
+        )
         await analyses_col.update_one(
             {"id": analysis_id},
             {
@@ -563,9 +616,12 @@ async def _run_pipeline(
                     "issues": [i.model_dump() for i in all_issues],
                     "posted_count": posted,
                     "post_error": post_err_msg,
+                    "quota_exceeded": quota_state["exceeded"],
+                    "unchecked_instances": unchecked_count,
                     "message": f"Done. {len(all_issues)} issues found, "
                     f"{posted} posted to Frame.io"
-                    + (" via API." if posted_via_official else " as Spellchecker."),
+                    + (" via API." if posted_via_official else " as Spellchecker.")
+                    + quota_note,
                 }
             },
         )
