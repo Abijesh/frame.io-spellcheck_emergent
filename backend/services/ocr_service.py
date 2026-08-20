@@ -50,15 +50,7 @@ def _get_reader():
     return _reader
 
 
-def ocr_frame(image_path: str) -> List[dict]:
-    """Read all text boxes in a frame: [{"text","bbox":(x0,y0,x1,y1),"conf"}]."""
-    reader = _get_reader()
-    try:
-        results = reader.readtext(image_path)
-    except Exception as exc:
-        logger.warning("EasyOCR failed on %s: %s", image_path, exc)
-        return []
-
+def _parse_hits(results) -> List[dict]:
     out: List[dict] = []
     for bbox, text, conf in results:
         if len(text.strip()) < MIN_CHARS_PER_HIT:
@@ -77,6 +69,40 @@ def ocr_frame(image_path: str) -> List[dict]:
             }
         )
     return out
+
+
+def ocr_frame(image_path: str) -> List[dict]:
+    """Read all text boxes in a frame: [{"text","bbox":(x0,y0,x1,y1),"conf"}]."""
+    reader = _get_reader()
+    try:
+        results = reader.readtext(image_path)
+    except Exception as exc:
+        logger.warning("EasyOCR failed on %s: %s", image_path, exc)
+        return []
+    return _parse_hits(results)
+
+
+def ocr_frames_batch(image_paths: List[str]) -> List[List[dict]]:
+    """Same as ocr_frame, but for N same-sized frames in one call. EasyOCR's
+    detector (the expensive stage) runs as a single batched GPU forward pass
+    instead of once per image -- real parallelism, not just fewer Python
+    calls. Requires every image in the batch to be the same size, which
+    holds here since they all come from one ffmpeg extract_frames run at a
+    fixed scale. Falls back to one-by-one on any failure (e.g. a corrupt
+    frame) rather than losing the whole batch."""
+    if not image_paths:
+        return []
+    reader = _get_reader()
+    try:
+        batch_results = reader.readtext_batched(
+            image_paths, batch_size=len(image_paths)
+        )
+    except Exception as exc:
+        logger.warning(
+            "EasyOCR batched read failed (%s), falling back to one-by-one", exc
+        )
+        return [ocr_frame(p) for p in image_paths]
+    return [_parse_hits(r) for r in batch_results]
 
 
 def _signature(frame_results: List[dict]) -> str:
