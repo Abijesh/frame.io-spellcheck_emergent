@@ -58,9 +58,40 @@ def test_no_text_anywhere_yields_no_instances():
     assert merge_instances([(0.0, []), (0.5, []), (1.0, [])]) == []
 
 
+def test_prefers_a_visually_settled_frame_over_a_mid_animation_one():
+    # Frame 0: text still sliding in (offset box) but happens to have the
+    # highest raw OCR confidence -- picking by confidence alone would grab
+    # this one, but it'd be mid-animation (blurry/distorted) in a real video.
+    # Frames 1-2: text has settled into its final position and holds there.
+    frames = [
+        (0.0, [_hit("Subscribe Now", conf=0.97, box=(40, 10, 130, 28))]),
+        (0.5, [_hit("Subscribe Now", conf=0.85, box=(0, 0, 100, 20))]),
+        (1.0, [_hit("Subscribe Now", conf=0.80, box=(0, 0, 100, 20))]),
+    ]
+    instances = merge_instances(frames)
+    assert len(instances) == 1
+    # Settled frame (1), not the higher-confidence but still-moving frame (0).
+    assert instances[0]["frame_index"] == 1
+
+
+def test_falls_back_to_highest_confidence_when_nothing_ever_settles():
+    # Every sample lands in a different place (e.g. a fast scrolling ticker)
+    # -- nothing counts as "stable", so this falls back to the old rule:
+    # whichever sample OCR'd most confidently.
+    frames = [
+        (0.0, [_hit("Breaking News", conf=0.6, box=(0, 0, 100, 20))]),
+        (0.5, [_hit("Breaking News", conf=0.95, box=(200, 0, 300, 20))]),
+        (1.0, [_hit("Breaking News", conf=0.7, box=(400, 0, 500, 20))]),
+    ]
+    instances = merge_instances(frames)
+    assert instances[0]["frame_index"] == 1
+
+
 if __name__ == "__main__":
     test_merges_consecutive_matching_frames_into_one_instance()
     test_dissimilar_text_starts_a_new_instance()
     test_empty_frame_closes_the_open_instance()
     test_no_text_anywhere_yields_no_instances()
+    test_prefers_a_visually_settled_frame_over_a_mid_animation_one()
+    test_falls_back_to_highest_confidence_when_nothing_ever_settles()
     print("ocr_service.merge_instances: all checks passed")
