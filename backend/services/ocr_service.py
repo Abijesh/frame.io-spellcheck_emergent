@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.6  # consecutive frames counted as "same text"
 STABILITY_SHIFT_THRESHOLD = 0.08  # fraction of text-box size counted as "settled"
+STABLE_TEXT_RATIO = 0.95  # consecutive frames counted as textually unchanged
+MIN_CHARS_PER_HIT = 2  # isolated single characters are near-never a real caption
+# A reading that only ever showed up in one sample, with nothing to corroborate
+# it, needs to be this confident to survive -- otherwise it's more likely a
+# misread of a blurry/textured background than genuine on-screen text.
+MIN_CONFIDENCE_FOR_LONE_SAMPLE = 0.65
 
 # WCAG 2.x contrast minimums: 4.5:1 for normal text, 3:1 for "large" text
 # (>=~24px / bold >=~19px, using box height as a proxy for point size here).
@@ -55,7 +61,11 @@ def ocr_frame(image_path: str) -> List[dict]:
 
     out: List[dict] = []
     for bbox, text, conf in results:
-        if not text.strip():
+        if len(text.strip()) < MIN_CHARS_PER_HIT:
+            # An isolated single character (a stray digit, a UI glyph, film
+            # grain misread as a letter) isn't meaningful on-screen text a
+            # viewer would actually read -- drop it before it ever becomes an
+            # "instance" worth a Gemini call or a contrast check.
             continue
         xs = [p[0] for p in bbox]
         ys = [p[1] for p in bbox]
@@ -108,13 +118,20 @@ def merge_instances(
     Returns one dict per distinct piece of on-screen text:
     {"start": float, "end": float, "frame_index": int, "ocr_results": [...]}
     — frame_index/ocr_results point at the representative frame used as both
-    Gemini's input and the contrast check's input: preferentially a visually
-    *settled* frame (its text box barely moved/resized versus a neighboring
-    sample, so it's not mid-animation-in/out and won't read blurry or
-    distorted), tie-broken by highest total OCR confidence. Falls back to
-    pure highest-confidence if no sample ever looks settled (e.g. only one
-    sample landed in the instance's span, or the text never stops moving --
-    a fast ticker).
+    Gemini's input and the contrast check's input: preferentially a frame
+    that's both visually settled (its text box barely moved/resized versus a
+    neighboring sample -- not mid slide/scale animation) *and* textually
+    unchanged from that neighbor (rules out a fixed-position reveal, e.g. a
+    typewriter effect, where the box never moves but the text is still
+    incomplete). Falls back to pure highest-confidence if no sample ever
+    looks settled (e.g. only one sample landed in the instance's span, or the
+    text never stops moving -- a fast ticker).
+
+    Instances that only ever showed up in a single sample, and weren't read
+    confidently even then, are dropped entirely (see MIN_CONFIDENCE_FOR_LONE_
+    SAMPLE) -- real on-screen text tends to hold for multiple samples at any
+    reasonable sampling interval, so an uncorroborated one-off reading is
+    more likely a misread of a blurry/textured background.
 
     Ponytail: similarity is judged on the whole frame's concatenated text
     (via difflib against the *previous matched* frame, not the instance's
@@ -153,14 +170,14 @@ def merge_instances(
     for inst in instances:
         frame_idxs = inst["frames"]
         boxes = [_bbox_union(frames[i][1]) for i in frame_idxs]
-        shifts = [
-            _bbox_shift(boxes[k - 1], boxes[k]) for k in range(1, len(frame_idxs))
-        ]
+        sigs = [_signature(frames[i][1]) for i in frame_idxs]
         stable_positions = set()
-        for k, shift in enumerate(shifts):
-            if shift <= STABILITY_SHIFT_THRESHOLD:
+        for k in range(1, len(frame_idxs)):
+            shift = _bbox_shift(boxes[k - 1], boxes[k])
+            text_ratio = difflib.SequenceMatcher(None, sigs[k - 1], sigs[k]).ratio()
+            if shift <= STABILITY_SHIFT_THRESHOLD and text_ratio >= STABLE_TEXT_RATIO:
+                stable_positions.add(k - 1)
                 stable_positions.add(k)
-                stable_positions.add(k + 1)
         candidates = [frame_idxs[p] for p in stable_positions] or frame_idxs
 
         best_idx = max(
@@ -170,7 +187,14 @@ def merge_instances(
         inst["ocr_results"] = frames[best_idx][1]
         del inst["frames"]
 
-    return instances
+    def _worth_keeping(inst: dict) -> bool:
+        if inst["start"] != inst["end"]:
+            return True  # corroborated by 2+ samples
+        results = inst["ocr_results"]
+        avg_conf = sum(r["conf"] for r in results) / max(len(results), 1)
+        return avg_conf >= MIN_CONFIDENCE_FOR_LONE_SAMPLE
+
+    return [inst for inst in instances if _worth_keeping(inst)]
 
 
 def _relative_luminance(rgb):
