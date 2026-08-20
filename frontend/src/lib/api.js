@@ -50,6 +50,11 @@ export const deleteAnalysis = async (id) => {
   return data;
 };
 
+export const getVideoUrl = async (id) => {
+  const { data } = await api.get(`/analyses/${id}/video-url`);
+  return data;
+};
+
 export const getConfig = async () => {
   const { data } = await api.get("/config");
   return data;
