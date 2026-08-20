@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import itertools
 import logging
 import os
 import secrets
@@ -45,7 +46,6 @@ from typing import List, Optional, Tuple
 from dotenv import load_dotenv
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Cookie,
     FastAPI,
     File,
@@ -86,6 +86,31 @@ OCR_BATCH_SIZE = int(os.environ.get("OCR_BATCH_SIZE", "8"))
 # it. A bigger batch means fewer requests but a bigger blast radius if that
 # one request fails or the model gets confused across many frames at once.
 GEMINI_BATCH_SIZE = int(os.environ.get("GEMINI_BATCH_SIZE", "5"))
+# How many Gemini calls may be in flight at once, *across every analysis
+# currently running* -- previously each pipeline run created its own fresh
+# Semaphore(3), so N concurrent analyses could together fire 3*N calls at
+# once, no shared limit at all. This one is created once at module load and
+# shared by every run.
+GEMINI_CONCURRENCY = int(os.environ.get("GEMINI_CONCURRENCY", "3"))
+gemini_semaphore = asyncio.Semaphore(GEMINI_CONCURRENCY)
+# A transient (per-minute) 429 is worth retrying a couple of times before
+# giving up on a batch as unchecked -- see ai_service.GeminiRateLimited.
+GEMINI_MAX_RETRIES = 2
+# How many analyses can actually be processing (ffmpeg/OCR/Gemini) at once.
+# Previously every POST /api/analyses spawned its own unbounded
+# BackgroundTasks coroutine -- no cap, no queue, no ordering -- so N
+# concurrent uploads meant N full pipelines fighting over the one shared GPU
+# at once. This bounds that to a fixed worker pool pulling from a queue.
+PIPELINE_WORKERS = int(os.environ.get("PIPELINE_WORKERS", "2"))
+# Share-link jobs don't know their real duration until they're downloaded
+# (inside the pipeline itself), so they can't be prioritized by true length
+# at enqueue time. Assigning them this fixed "typical review" duration
+# instead of either extreme keeps a short upload from queuing behind a
+# waiting share-link job by default, without needing to resolve the share
+# up front just to find out. Ponytail: a guess, not a measurement -- revisit
+# if real usage shows most jobs are share links and this default is wrong
+# often enough to cause visible unfairness.
+UNKNOWN_DURATION_PRIORITY_SEC = 120.0
 # Product scope is spelling/grammar only for now. The prompt already asks
 # Gemini not to flag these, but that's not a guarantee -- drop them here too
 # so a model slip-up never reaches a user.
@@ -458,7 +483,6 @@ async def _run_pipeline(
         completed = 0
         unchecked_count = 0
         quota_state = {"exceeded": False}
-        sem = asyncio.Semaphore(3)  # cap concurrent Gemini calls
 
         async def _analyze_batch(batch: List[dict]):
             paths = [frames[inst["frame_index"]][1] for inst in batch]
@@ -467,14 +491,21 @@ async def _run_pipeline(
             if quota_state["exceeded"]:
                 pass  # already know every further call will 429 -- don't bother
             else:
-                try:
-                    async with sem:
-                        errs_per_frame = await ai_service.analyze_frames_batch(
-                            paths, allowlist_terms
-                        )
-                    checked = True
-                except ai_service.GeminiQuotaExceeded:
-                    quota_state["exceeded"] = True
+                for attempt in range(GEMINI_MAX_RETRIES + 1):
+                    try:
+                        async with gemini_semaphore:
+                            errs_per_frame = await ai_service.analyze_frames_batch(
+                                paths, allowlist_terms
+                            )
+                        checked = True
+                        break
+                    except ai_service.GeminiRateLimited as exc:
+                        if attempt == GEMINI_MAX_RETRIES:
+                            break  # still rate-limited -- leave this batch unchecked
+                        await asyncio.sleep(exc.retry_after)
+                    except ai_service.GeminiQuotaExceeded:
+                        quota_state["exceeded"] = True
+                        break
 
             results = []
             for inst, fpath, errs in zip(batch, paths, errs_per_frame):
@@ -573,13 +604,21 @@ async def _run_pipeline(
             await _set_status(
                 analysis_id, message="Checking transcript...", progress=82
             )
-            try:
-                transcript_errs = await ai_service.analyze_transcript(
-                    analysis.transcript, allowlist_terms
-                )
-            except ai_service.GeminiQuotaExceeded:
-                quota_state["exceeded"] = True
-                transcript_errs = []
+            transcript_errs: List[dict] = []
+            for attempt in range(GEMINI_MAX_RETRIES + 1):
+                try:
+                    async with gemini_semaphore:
+                        transcript_errs = await ai_service.analyze_transcript(
+                            analysis.transcript, allowlist_terms
+                        )
+                    break
+                except ai_service.GeminiRateLimited as exc:
+                    if attempt == GEMINI_MAX_RETRIES:
+                        break
+                    await asyncio.sleep(exc.retry_after)
+                except ai_service.GeminiQuotaExceeded:
+                    quota_state["exceeded"] = True
+                    break
             for e in transcript_errs:
                 if e.get("type") in SKIPPED_ISSUE_TYPES:
                     continue
@@ -662,6 +701,47 @@ async def _run_pipeline(
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+# ---------------- pipeline job queue ----------------
+# Replaces the old `background.add_task(_run_pipeline, ...)`, which gave
+# every request its own unbounded coroutine with no queue, no worker cap,
+# and no ordering -- a fixed pool of PIPELINE_WORKERS tasks pulls jobs off a
+# priority queue instead, so a short video doesn't sit stuck behind a long
+# one that happened to be submitted first.
+_pipeline_queue: "asyncio.PriorityQueue[tuple]" = asyncio.PriorityQueue()
+_queue_seq = itertools.count()  # tie-break for equal priority -> FIFO
+_pipeline_worker_tasks: List[asyncio.Task] = []
+
+
+def _enqueue_pipeline(
+    analysis_id: str,
+    video_local_path: Optional[str],
+    frameio_session_id: Optional[str],
+) -> None:
+    priority = UNKNOWN_DURATION_PRIORITY_SEC
+    if video_local_path:
+        try:
+            priority = video_service.get_duration(video_local_path)
+        except Exception:
+            pass
+    _pipeline_queue.put_nowait(
+        (priority, next(_queue_seq), (analysis_id, video_local_path, frameio_session_id))
+    )
+
+
+async def _pipeline_worker(worker_id: int) -> None:
+    while True:
+        _priority, _seq, args = await _pipeline_queue.get()
+        try:
+            await _run_pipeline(*args)
+        except Exception:
+            # _run_pipeline already catches and records its own failures --
+            # this is only a last-resort net so one bad job can't kill the
+            # worker and silently stop it from ever picking up another.
+            logger.exception("Pipeline worker %d: job crashed outside its own handling", worker_id)
+        finally:
+            _pipeline_queue.task_done()
 
 
 # ---------------- routes ----------------
@@ -747,7 +827,6 @@ async def frameio_oauth_disconnect(
 
 @api.post("/analyses")
 async def create_analysis(
-    background: BackgroundTasks,
     frameio_url: Optional[str] = Form(None),
     transcript: Optional[str] = Form(None),
     password: Optional[str] = Form(None),
@@ -781,7 +860,7 @@ async def create_analysis(
         with open(video_local_path, "wb") as out:
             shutil.copyfileobj(video.file, out)
 
-    background.add_task(_run_pipeline, analysis.id, video_local_path, fio_session)
+    _enqueue_pipeline(analysis.id, video_local_path, fio_session)
     d = analysis.model_dump()
     d.pop("password", None)
     return d
@@ -1056,8 +1135,16 @@ async def start_purge_loop():
     _purge_task = asyncio.create_task(_purge_loop())
 
 
+@app.on_event("startup")
+async def start_pipeline_workers():
+    for i in range(PIPELINE_WORKERS):
+        _pipeline_worker_tasks.append(asyncio.create_task(_pipeline_worker(i)))
+
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     if _purge_task:
         _purge_task.cancel()
+    for t in _pipeline_worker_tasks:
+        t.cancel()
     client.close()
