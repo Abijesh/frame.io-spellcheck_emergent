@@ -17,11 +17,46 @@ GEMINI_MODEL = "gemini-3-flash-preview"
 
 
 class GeminiQuotaExceeded(Exception):
-    """Raised when Gemini reports the request quota is exhausted (HTTP 429 /
-    RESOURCE_EXHAUSTED), so callers can tell "we couldn't check this" apart
-    from "we checked it and found nothing" -- previously both cases silently
-    returned an empty list, so a quota wall partway through a video looked
-    identical to a clean pass."""
+    """Raised on a 429 with no RetryInfo -- a hard daily-quota exhaustion,
+    not worth retrying until it resets. Lets callers tell "we couldn't check
+    this" apart from "we checked it and found nothing" -- previously both
+    cases silently returned an empty list, so a quota wall partway through a
+    video looked identical to a clean pass."""
+
+
+class GeminiRateLimited(Exception):
+    """Raised on a 429 that carries a RetryInfo.retryDelay -- a transient
+    per-minute/per-second rate limit, not the hard daily quota. Same HTTP
+    status as GeminiQuotaExceeded but a different meaning: this one clears
+    itself in seconds, so callers should back off and retry rather than
+    give up on the rest of the run."""
+
+    def __init__(self, retry_after: float, *args):
+        super().__init__(*args)
+        self.retry_after = retry_after
+
+
+def _retry_delay_seconds(exc: "genai_errors.APIError") -> Optional[float]:
+    """A 429's error body follows Google's standard error-detail model: a
+    transient rate limit attaches a google.rpc.RetryInfo.retryDelay meant to
+    be retried shortly, while a hard daily-quota 429 carries no RetryInfo at
+    all (retrying won't help until the quota resets at midnight Pacific).
+    That presence/absence is the only reliable way to tell the two apart --
+    both are the same HTTP 429 / RESOURCE_EXHAUSTED status."""
+    details = getattr(exc, "details", None) or {}
+    for item in details.get("details", []) or []:
+        if "RetryInfo" not in item.get("@type", ""):
+            continue
+        m = re.match(r"([\d.]+)s", item.get("retryDelay", ""))
+        return float(m.group(1)) if m else 5.0
+    return None
+
+
+def _raise_for_429(exc: "genai_errors.APIError") -> None:
+    delay = _retry_delay_seconds(exc)
+    if delay is not None:
+        raise GeminiRateLimited(delay, str(exc)) from exc
+    raise GeminiQuotaExceeded(str(exc)) from exc
 
 FRAME_SYSTEM = (
     "You are a meticulous proofreader for animation/video QA. "
@@ -165,7 +200,7 @@ async def analyze_frame(
         )
     except genai_errors.APIError as exc:
         if exc.code == 429:
-            raise GeminiQuotaExceeded(str(exc)) from exc
+            _raise_for_429(exc)
         logger.warning("Gemini frame call failed: %s", exc)
         return []
     except Exception as exc:
@@ -221,7 +256,7 @@ async def analyze_frames_batch(
         )
     except genai_errors.APIError as exc:
         if exc.code == 429:
-            raise GeminiQuotaExceeded(str(exc)) from exc
+            _raise_for_429(exc)
         logger.warning("Gemini batch frame call failed: %s", exc)
         return [[] for _ in image_paths]
     except Exception as exc:
@@ -262,7 +297,7 @@ async def analyze_transcript(
         )
     except genai_errors.APIError as exc:
         if exc.code == 429:
-            raise GeminiQuotaExceeded(str(exc)) from exc
+            _raise_for_429(exc)
         logger.warning("Gemini transcript call failed: %s", exc)
         return []
     except Exception as exc:
