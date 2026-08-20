@@ -10,8 +10,9 @@ has a connected Frame.io account (session cookie):
              arbitrary public share link outside that, so...
   Anonymous  (Playwright, guest mode): headless Chromium opens the share,
              scrapes the signed video URL, and posts comments by simulating
-             keyboard seeks + typing as a guest named 'Spellchecker'. This is
-             the only way to handle a share link from someone else's account.
+             keyboard seeks + typing as a guest (see frameio_service.GUEST_
+             NAME). This is the only way to handle a share link from someone
+             else's account.
 
 Both paths first do a lightweight page-load of the share link to resolve its
 file UUID (frameio_service.resolve_share_video) -- the official API has no
@@ -77,6 +78,14 @@ analyses_col = db["analyses"]
 frameio_sessions_col = db["frameio_sessions"]
 
 FRAME_INTERVAL = float(os.environ.get("FRAME_SAMPLE_INTERVAL", "0.5"))
+# Frames per EasyOCR detector call -- bounds GPU memory use per batch, tune
+# down on smaller GPUs / up on bigger ones.
+OCR_BATCH_SIZE = int(os.environ.get("OCR_BATCH_SIZE", "8"))
+# Text instances per Gemini call -- the free tier's quota is a request
+# *count*, not a token budget, so this is the main lever for staying under
+# it. A bigger batch means fewer requests but a bigger blast radius if that
+# one request fails or the model gets confused across many frames at once.
+GEMINI_BATCH_SIZE = int(os.environ.get("GEMINI_BATCH_SIZE", "5"))
 # Product scope is spelling/grammar only for now. The prompt already asks
 # Gemini not to flag these, but that's not a guarantee -- drop them here too
 # so a model slip-up never reaches a user.
@@ -409,20 +418,27 @@ async def _run_pipeline(
             message=f"Scanning {len(frames)} frames for on-screen text...",
             progress=25,
         )
-        # Sequential: a single GPU-backed EasyOCR reader, one call at a time.
-        # (Concurrent threads gave no speedup on CPU and add real risk on a
-        # single shared CUDA context, so not worth it now that GPU alone
-        # makes each call fast.)
+        # Batched: EasyOCR's detector runs as one GPU forward pass per batch
+        # instead of one image at a time -- real parallelism (not just fewer
+        # Python calls), since a single-image call leaves the GPU mostly
+        # idle waiting on Python/CPU overhead between frames. Chunked rather
+        # than one giant batch to bound VRAM use on modest GPUs. Still a
+        # single shared CUDA context, so batches run one after another, not
+        # concurrently with each other.
         frame_results: List[Tuple[float, List[dict]]] = []
-        for i, (ts, fpath) in enumerate(frames):
-            hits = await asyncio.to_thread(ocr_service.ocr_frame, fpath)
-            frame_results.append((ts, hits))
-            if i % 5 == 0 or i == len(frames) - 1:
-                await _set_status(
-                    analysis_id,
-                    progress=25 + int(20 * (i + 1) / max(len(frames), 1)),
-                    message=f"Scanning frame {i + 1}/{len(frames)} for text...",
-                )
+        for chunk_start in range(0, len(frames), OCR_BATCH_SIZE):
+            chunk = frames[chunk_start : chunk_start + OCR_BATCH_SIZE]
+            hits_batch = await asyncio.to_thread(
+                ocr_service.ocr_frames_batch, [fpath for _, fpath in chunk]
+            )
+            for (ts, _), hits in zip(chunk, hits_batch):
+                frame_results.append((ts, hits))
+            done = chunk_start + len(chunk)
+            await _set_status(
+                analysis_id,
+                progress=25 + int(20 * done / max(len(frames), 1)),
+                message=f"Scanning frame {done}/{len(frames)} for text...",
+            )
         instances = ocr_service.merge_instances(frame_results)
         _log_stage(
             f"local OCR scan ({len(frames)} frames -> {len(instances)} "
@@ -444,91 +460,101 @@ async def _run_pipeline(
         quota_state = {"exceeded": False}
         sem = asyncio.Semaphore(3)  # cap concurrent Gemini calls
 
-        async def _analyze_one(inst: dict):
-            _, fpath = frames[inst["frame_index"]]
-            errs: List[dict] = []
+        async def _analyze_batch(batch: List[dict]):
+            paths = [frames[inst["frame_index"]][1] for inst in batch]
+            errs_per_frame: List[List[dict]] = [[] for _ in batch]
             checked = False
             if quota_state["exceeded"]:
                 pass  # already know every further call will 429 -- don't bother
             else:
                 try:
                     async with sem:
-                        errs = await ai_service.analyze_frame(fpath, allowlist_terms)
+                        errs_per_frame = await ai_service.analyze_frames_batch(
+                            paths, allowlist_terms
+                        )
                     checked = True
                 except ai_service.GeminiQuotaExceeded:
                     quota_state["exceeded"] = True
-            thumb = await asyncio.to_thread(
-                ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
-            )
-            contrast_hits: List[dict] = []
-            if analysis.check_contrast:
-                contrast_hits = await asyncio.to_thread(
-                    ocr_service.check_contrast, fpath, inst["ocr_results"]
+
+            results = []
+            for inst, fpath, errs in zip(batch, paths, errs_per_frame):
+                thumb = await asyncio.to_thread(
+                    ocr_service.crop_thumbnail, fpath, inst["ocr_results"]
                 )
-            return inst, errs, thumb, contrast_hits, checked
+                contrast_hits: List[dict] = []
+                if analysis.check_contrast:
+                    contrast_hits = await asyncio.to_thread(
+                        ocr_service.check_contrast, fpath, inst["ocr_results"]
+                    )
+                results.append((inst, errs, thumb, contrast_hits, checked))
+            return results
 
         async def _run_with_progress():
             nonlocal completed, unchecked_count
-            tasks = [asyncio.create_task(_analyze_one(inst)) for inst in instances]
+            batches = [
+                instances[i : i + GEMINI_BATCH_SIZE]
+                for i in range(0, len(instances), GEMINI_BATCH_SIZE)
+            ]
+            tasks = [asyncio.create_task(_analyze_batch(b)) for b in batches]
             for fut in asyncio.as_completed(tasks):
-                inst, errs, thumb, contrast_hits, checked = await fut
-                if not checked:
-                    unchecked_count += 1
-                thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
-                for e in errs:
-                    if e.get("type") in SKIPPED_ISSUE_TYPES:
-                        continue
-                    if (e.get("original") or "").strip().lower() in allowlist_set:
-                        continue
-                    all_issues.append(
-                        Issue(
-                            timestamp_sec=float(inst["start"]),
-                            end_sec=float(inst["end"]),
-                            type=e.get("type", "spelling"),
-                            original=e.get("original", ""),
-                            suggestion=e.get("suggestion", ""),
-                            explanation=e.get("explanation", ""),
-                            source_text=e.get("source_text", ""),
-                            severity=_severity_for(e.get("type", "spelling")),
-                            thumbnail_b64=thumb_b64,
+                for inst, errs, thumb, contrast_hits, checked in await fut:
+                    if not checked:
+                        unchecked_count += 1
+                    thumb_b64 = base64.b64encode(thumb).decode() if thumb else None
+                    for e in errs:
+                        if e.get("type") in SKIPPED_ISSUE_TYPES:
+                            continue
+                        if (e.get("original") or "").strip().lower() in allowlist_set:
+                            continue
+                        all_issues.append(
+                            Issue(
+                                timestamp_sec=float(inst["start"]),
+                                end_sec=float(inst["end"]),
+                                type=e.get("type", "spelling"),
+                                original=e.get("original", ""),
+                                suggestion=e.get("suggestion", ""),
+                                explanation=e.get("explanation", ""),
+                                source_text=e.get("source_text", ""),
+                                severity=_severity_for(e.get("type", "spelling")),
+                                thumbnail_b64=thumb_b64,
+                            )
                         )
-                    )
-                if contrast_hits:
-                    # Only the worst offender per instance -- one contrast
-                    # issue per on-screen text instance, same granularity as
-                    # the spelling/grammar checks above.
-                    worst = min(contrast_hits, key=lambda c: c["ratio"])
-                    all_issues.append(
-                        Issue(
-                            timestamp_sec=float(inst["start"]),
-                            end_sec=float(inst["end"]),
-                            type="contrast",
-                            original=worst["text"],
-                            source_text=worst["text"],
-                            explanation=(
-                                "This text blends into what's behind it, so it's "
-                                "hard to read at a glance. Try a bolder/lighter "
-                                "text color, an outline, or a drop shadow/"
-                                "background behind it. (Measured contrast "
-                                f"{worst['ratio']}:1 — accessibility guidelines "
-                                f"call for at least {worst['threshold']}:1.)"
-                            ),
-                            severity=_severity_for("contrast"),
-                            thumbnail_b64=thumb_b64,
+                    if contrast_hits:
+                        # Only the worst offender per instance -- one contrast
+                        # issue per on-screen text instance, same granularity as
+                        # the spelling/grammar checks above.
+                        worst = min(contrast_hits, key=lambda c: c["ratio"])
+                        all_issues.append(
+                            Issue(
+                                timestamp_sec=float(inst["start"]),
+                                end_sec=float(inst["end"]),
+                                type="contrast",
+                                original=worst["text"],
+                                source_text=worst["text"],
+                                explanation=(
+                                    "This text blends into what's behind it, so it's "
+                                    "hard to read at a glance. Try a bolder/lighter "
+                                    "text color, an outline, or a drop shadow/"
+                                    "background behind it. (Measured contrast "
+                                    f"{worst['ratio']}:1 — accessibility guidelines "
+                                    f"call for at least {worst['threshold']}:1.)"
+                                ),
+                                severity=_severity_for("contrast"),
+                                thumbnail_b64=thumb_b64,
+                            )
                         )
+                    completed += 1
+                    await analyses_col.update_one(
+                        {"id": analysis_id},
+                        {
+                            "$set": {
+                                "analyzed_frames": completed,
+                                "progress": 45 + int(35 * completed / max(len(instances), 1)),
+                                "issues": [i.model_dump() for i in all_issues],
+                                "message": f"Checked {completed}/{len(instances)} text instances",
+                            }
+                        },
                     )
-                completed += 1
-                await analyses_col.update_one(
-                    {"id": analysis_id},
-                    {
-                        "$set": {
-                            "analyzed_frames": completed,
-                            "progress": 45 + int(35 * completed / max(len(instances), 1)),
-                            "issues": [i.model_dump() for i in all_issues],
-                            "message": f"Checked {completed}/{len(instances)} text instances",
-                        }
-                    },
-                )
 
         await _run_with_progress()
         _log_stage(
@@ -620,7 +646,11 @@ async def _run_pipeline(
                     "unchecked_instances": unchecked_count,
                     "message": f"Done. {len(all_issues)} issues found, "
                     f"{posted} posted to Frame.io"
-                    + (" via API." if posted_via_official else " as Spellchecker.")
+                    + (
+                        " via API."
+                        if posted_via_official
+                        else f" as {frameio_service.GUEST_NAME}."
+                    )
                     + quota_note,
                 }
             },
