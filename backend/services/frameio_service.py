@@ -10,8 +10,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-GUEST_NAME = "Spellchecker"
-GUEST_EMAIL = "spellchecker@proof.io"
+GUEST_NAME = "Proof.io"
+GUEST_EMAIL = "qa@proof.io"
 ASSET_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
