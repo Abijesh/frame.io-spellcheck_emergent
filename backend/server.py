@@ -127,10 +127,9 @@ async def _new_frameio_session(tokens: dict) -> str:
         expires_at=expires_at,
     )
     try:
-        account_ids = await frameio_api.list_account_ids(session.access_token)
-        session.account_id = account_ids[0] if account_ids else None
+        session.account_ids = await frameio_api.list_account_ids(session.access_token)
     except frameio_api.FrameioApiError as exc:
-        logger.warning("Could not resolve Frame.io account_id at connect time: %s", exc)
+        logger.warning("Could not resolve Frame.io accounts at connect time: %s", exc)
     await frameio_sessions_col.insert_one(session.model_dump())
     return session.id
 
@@ -168,6 +167,28 @@ async def _get_valid_frameio_token(session_id: Optional[str]) -> Optional[Framei
     return session
 
 
+async def _resolve_reachable_account_id(
+    fio_session: Optional[FrameioSession], file_id: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Tries every Frame.io account this identity belongs to (see the comment
+    on FrameioSession.account_ids -- there can be several, with no "default")
+    and returns the (account_id, download_url) of the first one that can
+    actually see this file, or (None, None) if none can."""
+    if not fio_session or not fio_session.account_ids or not file_id:
+        return None, None
+    for account_id in fio_session.account_ids:
+        try:
+            url = await frameio_api.get_file_download_url(
+                fio_session.access_token, account_id, file_id
+            )
+        except frameio_api.FrameioApiError as exc:
+            logger.warning("Account %s file lookup failed: %s", account_id, exc)
+            continue
+        if url:
+            return account_id, url
+    return None, None
+
+
 def _severity_for(err_type: str) -> str:
     return {
         "spelling": "high",
@@ -190,25 +211,18 @@ async def _post_issues_to_frameio(
     if not issues:
         return {"posted": 0, "error": None}
 
-    official_file_reachable = False
-    if fio_session and fio_session.account_id and analysis.frameio_asset_id:
-        try:
-            official_file_reachable = bool(
-                await frameio_api.get_file_download_url(
-                    fio_session.access_token, fio_session.account_id, analysis.frameio_asset_id
-                )
-            )
-        except frameio_api.FrameioApiError as exc:
-            logger.warning("Official file lookup failed, falling back to guest: %s", exc)
+    account_id, _ = await _resolve_reachable_account_id(
+        fio_session, analysis.frameio_asset_id
+    )
 
-    if official_file_reachable:
+    if account_id:
         posted = 0
         for issue in issues:
             frame = frameio_api.sec_to_frame(issue.timestamp_sec, analysis.video_fps)
             try:
                 resp = await frameio_api.create_comment(
                     fio_session.access_token,
-                    fio_session.account_id,
+                    account_id,
                     analysis.frameio_asset_id,
                     _format_comment(issue),
                     frame,
@@ -340,18 +354,13 @@ async def _run_pipeline(
             )
 
             download_url = info["video_url"]
-            if fio_session and fio_session.account_id and info.get("file_id"):
-                try:
-                    official_url = await frameio_api.get_file_download_url(
-                        fio_session.access_token, fio_session.account_id, info["file_id"]
-                    )
-                    if official_url:
-                        download_url = official_url
-                        official_file_reachable = True
-                except frameio_api.FrameioApiError as exc:
-                    logger.warning(
-                        "Official file lookup failed, using scraped URL instead: %s", exc
-                    )
+            if fio_session and info.get("file_id"):
+                _, official_url = await _resolve_reachable_account_id(
+                    fio_session, info["file_id"]
+                )
+                if official_url:
+                    download_url = official_url
+                    official_file_reachable = True
 
             ok = await frameio_service.download_video(download_url, video_path)
             if not ok:
@@ -529,7 +538,7 @@ async def _run_pipeline(
             and analysis.auto_post
             and all_issues
             and (
-                (fio_session and fio_session.account_id and analysis.frameio_asset_id)
+                (fio_session and fio_session.account_ids and analysis.frameio_asset_id)
                 or (analysis.frameio_url and frameio_service.is_share_link(analysis.frameio_url))
             )
         ):
@@ -636,7 +645,7 @@ async def frameio_oauth_status(
     fio_session: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ):
     session = await _get_valid_frameio_token(fio_session)
-    return {"connected": bool(session and session.account_id)}
+    return {"connected": bool(session and session.account_ids)}
 
 
 @api.post("/frameio/oauth/disconnect")
