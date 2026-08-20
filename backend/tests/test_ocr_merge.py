@@ -74,6 +74,49 @@ def test_prefers_a_visually_settled_frame_over_a_mid_animation_one():
     assert instances[0]["frame_index"] == 1
 
 
+def test_prefers_complete_text_over_a_still_growing_reveal():
+    # A fixed-position caption box where the text reveals progressively
+    # (typewriter effect) -- bbox-only stability would be fooled, since the
+    # box itself never moves even while the text is still incomplete. Only
+    # the last two samples, where the full word has finished appearing and
+    # holds steady, are both position- *and* text-stable.
+    box = (0, 0, 200, 20)
+    frames = [
+        (0.0, [_hit("diffic", conf=0.90, box=box)]),
+        (1.5, [_hit("difficul", conf=0.92, box=box)]),
+        (3.0, [_hit("difficulties", conf=0.85, box=box)]),
+        (4.5, [_hit("difficulties", conf=0.88, box=box)]),
+    ]
+    instances = merge_instances(frames)
+    assert len(instances) == 1
+    picked = frames[instances[0]["frame_index"]][1][0]["text"]
+    assert picked == "difficulties"  # not the still-typing "diffic"/"difficul"
+
+
+def test_drops_an_unconfident_reading_seen_only_once():
+    # A single low-confidence sample with nothing to corroborate it -- the
+    # profile of a misread background texture, not a real caption.
+    frames = [
+        (0.0, []),
+        (1.5, [_hit("pErEatnt", conf=0.35)]),
+        (3.0, []),
+    ]
+    assert merge_instances(frames) == []
+
+
+def test_keeps_a_confident_reading_seen_only_once():
+    # A single sample can still be trusted if the OCR was genuinely sure --
+    # e.g. a caption that only overlapped one sample point by chance.
+    frames = [
+        (0.0, []),
+        (1.5, [_hit("Chapter Two", conf=0.93)]),
+        (3.0, []),
+    ]
+    instances = merge_instances(frames)
+    assert len(instances) == 1
+    assert instances[0]["start"] == instances[0]["end"] == 1.5
+
+
 def test_falls_back_to_highest_confidence_when_nothing_ever_settles():
     # Every sample lands in a different place (e.g. a fast scrolling ticker)
     # -- nothing counts as "stable", so this falls back to the old rule:
@@ -93,5 +136,8 @@ if __name__ == "__main__":
     test_empty_frame_closes_the_open_instance()
     test_no_text_anywhere_yields_no_instances()
     test_prefers_a_visually_settled_frame_over_a_mid_animation_one()
+    test_prefers_complete_text_over_a_still_growing_reveal()
+    test_drops_an_unconfident_reading_seen_only_once()
+    test_keeps_a_confident_reading_seen_only_once()
     test_falls_back_to_highest_confidence_when_nothing_ever_settles()
     print("ocr_service.merge_instances: all checks passed")
