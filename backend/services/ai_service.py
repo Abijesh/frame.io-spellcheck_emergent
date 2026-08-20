@@ -37,6 +37,25 @@ FRAME_SYSTEM = (
     "Do not invent text. Do not flag stylistic choices."
 )
 
+FRAME_BATCH_SYSTEM = (
+    "You are a meticulous proofreader for animation/video QA. You will be "
+    "shown several frames from a video, each preceded by a label of the "
+    "exact form 'Frame N:' (N is its index). Treat each frame completely "
+    "independently -- they are unrelated moments, not a sequence. For EACH "
+    "frame, perform OCR to read every visible piece of text (titles, "
+    "captions, lower thirds, on-screen UI). For each distinct text block on "
+    "that frame, check ONLY for spelling and grammar mistakes -- do not "
+    "flag punctuation or capitalization issues. "
+    "Return ONLY a strict JSON object — no prose, no markdown — of this "
+    "exact shape:\n"
+    "{\"frames\": [{\"index\": int, \"texts\": [{\"original\": str, "
+    "\"has_error\": bool, \"errors\": [{\"type\": \"spelling|grammar\", "
+    "\"original\": str, \"suggestion\": str, \"explanation\": str}]}]}]}\n"
+    "Include exactly one entry in \"frames\" for every frame index you were "
+    "shown, even if that frame has no readable text (use an empty \"texts\" "
+    "list in that case). Do not invent text. Do not flag stylistic choices."
+)
+
 TRANSCRIPT_SYSTEM = (
     "You are a meticulous proofreader. Given a transcript or script, check "
     "ONLY for spelling and grammar mistakes -- do not flag punctuation or "
@@ -101,6 +120,25 @@ def _strip_json(raw: str) -> str:
     return m.group(0) if m else raw
 
 
+def _parse_texts_block(texts: list) -> List[dict]:
+    out: List[dict] = []
+    for block in texts or []:
+        if not block.get("has_error"):
+            continue
+        original_text = block.get("original", "")
+        for err in block.get("errors", []) or []:
+            out.append(
+                {
+                    "type": err.get("type", "spelling"),
+                    "original": err.get("original") or original_text,
+                    "suggestion": err.get("suggestion", ""),
+                    "explanation": err.get("explanation", ""),
+                    "source_text": original_text,
+                }
+            )
+    return out
+
+
 async def analyze_frame(
     image_path: str, allowlist: Optional[List[str]] = None
 ) -> List[dict]:
@@ -141,21 +179,68 @@ async def analyze_frame(
         logger.debug("Could not parse Gemini frame response: %s", raw[:200])
         return []
 
-    out: List[dict] = []
-    for block in data.get("texts", []) or []:
-        if not block.get("has_error"):
+    return _parse_texts_block(data.get("texts", []))
+
+
+async def analyze_frames_batch(
+    image_paths: List[str], allowlist: Optional[List[str]] = None
+) -> List[List[dict]]:
+    """Same as analyze_frame, but for N frames in a single Gemini request.
+    Returns one error-list per input path, same order. Cuts request *count*
+    roughly N-fold -- what the free-tier quota actually limits, not token
+    volume -- at the cost of a bigger blast radius if the one request fails
+    or the model loses track across many frames (mitigated by keeping
+    GEMINI_BATCH_SIZE modest in server.py, not by anything in here)."""
+    client = _get_client()
+    if not client:
+        logger.error("GEMINI_API_KEY missing")
+        return [[] for _ in image_paths]
+    if not image_paths:
+        return []
+
+    contents: List[object] = []
+    for i, path in enumerate(image_paths):
+        with open(path, "rb") as f:
+            image_bytes = f.read()
+        contents.append(f"Frame {i}:")
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+    contents.append(
+        f"Analyze all {len(image_paths)} frames above (indices 0 to "
+        f"{len(image_paths) - 1}) and return the JSON described in the "
+        "system prompt, with one entry in \"frames\" per index."
+    )
+
+    try:
+        response = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=_with_allowlist(FRAME_BATCH_SYSTEM, allowlist),
+                response_mime_type="application/json",
+            ),
+        )
+    except genai_errors.APIError as exc:
+        if exc.code == 429:
+            raise GeminiQuotaExceeded(str(exc)) from exc
+        logger.warning("Gemini batch frame call failed: %s", exc)
+        return [[] for _ in image_paths]
+    except Exception as exc:
+        logger.warning("Gemini batch frame call failed: %s", exc)
+        return [[] for _ in image_paths]
+
+    raw = response.text or ""
+    try:
+        data = json.loads(_strip_json(raw))
+    except Exception:
+        logger.debug("Could not parse Gemini batch response: %s", raw[:200])
+        return [[] for _ in image_paths]
+
+    out: List[List[dict]] = [[] for _ in image_paths]
+    for frame_result in data.get("frames", []) or []:
+        idx = frame_result.get("index")
+        if not isinstance(idx, int) or not (0 <= idx < len(image_paths)):
             continue
-        original_text = block.get("original", "")
-        for err in block.get("errors", []) or []:
-            out.append(
-                {
-                    "type": err.get("type", "spelling"),
-                    "original": err.get("original") or original_text,
-                    "suggestion": err.get("suggestion", ""),
-                    "explanation": err.get("explanation", ""),
-                    "source_text": original_text,
-                }
-            )
+        out[idx] = _parse_texts_block(frame_result.get("texts", []))
     return out
 
 
