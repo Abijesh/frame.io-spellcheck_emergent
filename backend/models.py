@@ -62,6 +62,12 @@ class Analysis(BaseModel):
     error: Optional[str] = None
     deleted: bool = False
     deleted_at: Optional[str] = None
+    # Set when Gemini's quota ran out partway through -- issues found before
+    # that point are real and kept; unchecked_instances counts how many
+    # on-screen text instances were never actually checked as a result (not
+    # the same as "checked and found clean").
+    quota_exceeded: bool = False
+    unchecked_instances: int = 0
 
 
 class AnalyzeRequest(BaseModel):
